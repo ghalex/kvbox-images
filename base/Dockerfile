@@ -24,6 +24,10 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     && rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub \
     # Generated on first boot too.
     && : > /etc/machine-id \
+    # Clients forward LANG/LC_* over SSH and the image only has C.UTF-8: don't accept them,
+    # and give the guest a sane default locale (kvbox issue #24).
+    && sed -i 's/^AcceptEnv LANG LC_\*/#&/' /etc/ssh/sshd_config \
+    && printf 'LANG=C.UTF-8\n' > /etc/default/locale \
     && systemctl enable ssh.service kvbox-init.service \
     # Mask, don't disable: presets re-enable disabled units on first boot (seen in spike #4).
     && systemctl mask systemd-resolved.service systemd-timesyncd.service \

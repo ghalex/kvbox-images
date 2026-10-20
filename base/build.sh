@@ -43,6 +43,10 @@ docker run --rm -v "$out:/out" -e SIZE="$size" -e UID_GID="$(id -u):$(id -g)" "$
   mkdir /r
   tar -xf /out/rootfs.tar -C /r --numeric-owner --xattrs --xattrs-include="*"
   rm -f /out/rootfs.tar
+  # docker export leaves the container marker behind; with it, systemd in the guest believes it
+  # runs in a container and skips the sync + read-only remount at shutdown (lost writes, journal
+  # recovery on every boot). Same for anything else that says "container".
+  rm -f /r/.dockerenv /r/.dockerinit /r/run/.containerenv
   # Docker bind-mounts these during build, so write them here instead of in the Dockerfile.
   printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /r/etc/resolv.conf
   printf "127.0.0.1 localhost\n127.0.1.1 kvbox\n::1 localhost ip6-localhost ip6-loopback\n" > /r/etc/hosts
