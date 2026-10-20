@@ -22,8 +22,8 @@ keys before sshd starts. One image serves every host and user.
 Needs Docker; no root and no loop mount on the host.
 
 ```
-base/build.sh                 # -> base/out/rootfs.ext4 (2 GiB sparse, ~290 MB used), .sha256, .zst
-ROOTFS_SIZE=4G base/build.sh  # larger disk
+base/build.sh                 # -> base/out/rootfs.ext4 (4 GiB sparse, ~290 MB used), .sha256, .zst
+ROOTFS_SIZE=8G base/build.sh  # larger disk
 ```
 
 The build runs `docker build`, `docker export`, then `mkfs.ext4 -d` inside a

@@ -2,11 +2,11 @@
 # Build the kvbox base image: base/out/rootfs.ext4 (+ .sha256, + .zst for releases).
 #
 #   base/build.sh                   # needs Docker; no root on the host
-#   ROOTFS_SIZE=4G base/build.sh
+#   ROOTFS_SIZE=8G base/build.sh
 #
 # Flow: docker build → docker export → mkfs.ext4 -d inside a container (so file
 # ownership and modes survive without a loop mount). The output is a sparse
-# file: 2 GiB of disk, a few hundred MB on the host.
+# file: 4 GiB of disk, a few hundred MB on the host.
 #
 # Boot it with (install.sh / kvbox fill these in):
 #   console=ttyS0 reboot=k panic=1          (Firecracker appends pci=off root=/dev/vda rw itself)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="$here/out"
-size="${ROOTFS_SIZE:-2G}"
+size="${ROOTFS_SIZE:-4G}"
 tag="kvbox-base:local"
 
 if [[ -t 1 ]]; then BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; NC=$'\033[0m'; else BOLD=""; GREEN=""; RED=""; NC=""; fi
