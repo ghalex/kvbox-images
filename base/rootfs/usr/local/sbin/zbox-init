@@ -1,0 +1,33 @@
+#!/bin/sh
+# First-boot setup from the kernel command line. Runs before sshd.
+#   zbox.name=<hostname>          box name
+#   zbox.sshkey=<base64 pubkey>   authorized key for the zbox user
+# The IP itself comes from the kernel's own ip= argument, so no DHCP and no agent.
+set -eu
+
+name=""; key=""
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    zbox.name=*)   name="${arg#zbox.name=}" ;;
+    zbox.sshkey=*) key="${arg#zbox.sshkey=}" ;;
+  esac
+done
+
+if [ -n "$name" ]; then
+  echo "$name" > /etc/hostname
+  hostname "$name"
+  grep -q "^127.0.1.1" /etc/hosts && sed -i "s/^127.0.1.1.*/127.0.1.1 $name/" /etc/hosts || echo "127.0.1.1 $name" >> /etc/hosts
+fi
+
+if [ -n "$key" ]; then
+  mkdir -p /home/zbox/.ssh
+  echo "$key" | base64 -d > /home/zbox/.ssh/authorized_keys
+  chmod 700 /home/zbox/.ssh
+  chmod 600 /home/zbox/.ssh/authorized_keys
+  chown -R zbox:zbox /home/zbox/.ssh
+fi
+
+# Per-box SSH host keys on first boot (deleted from the base image at build time).
+if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
+  ssh-keygen -A
+fi
