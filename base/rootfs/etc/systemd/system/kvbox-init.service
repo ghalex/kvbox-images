@@ -1,12 +1,12 @@
 [Unit]
-Description=zbox first-boot setup from the kernel command line
+Description=kvbox first-boot setup from the kernel command line
 DefaultDependencies=no
 After=local-fs.target
 Before=ssh.service network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/zbox-init
+ExecStart=/usr/local/sbin/kvbox-init
 RemainAfterExit=yes
 
 [Install]

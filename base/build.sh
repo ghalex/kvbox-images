@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the zbox base image: base/out/rootfs.ext4 (+ .sha256, + .zst for releases).
+# Build the kvbox base image: base/out/rootfs.ext4 (+ .sha256, + .zst for releases).
 #
 #   base/build.sh                   # needs Docker; no root on the host
 #   ROOTFS_SIZE=4G base/build.sh
@@ -8,15 +8,15 @@
 # ownership and modes survive without a loop mount). The output is a sparse
 # file: 2 GiB of disk, a few hundred MB on the host.
 #
-# Boot it with (install.sh / zbox fill these in):
+# Boot it with (install.sh / kvbox fill these in):
 #   console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw
-#   ip=<ip>::<gw>:255.255.255.0::eth0:off zbox.name=<name> zbox.sshkey=<base64 pubkey>
+#   ip=<ip>::<gw>:255.255.255.0::eth0:off kvbox.name=<name> kvbox.sshkey=<base64 pubkey>
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="$here/out"
 size="${ROOTFS_SIZE:-2G}"
-tag="zbox-base:local"
+tag="kvbox-base:local"
 
 if [[ -t 1 ]]; then BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; NC=$'\033[0m'; else BOLD=""; GREEN=""; RED=""; NC=""; fi
 step() { printf '\n%s%s%s\n' "$BOLD" "$*" "$NC"; }
@@ -45,11 +45,11 @@ docker run --rm -v "$out:/out" -e SIZE="$size" -e UID_GID="$(id -u):$(id -g)" "$
   rm -f /out/rootfs.tar
   # Docker bind-mounts these during build, so write them here instead of in the Dockerfile.
   printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /r/etc/resolv.conf
-  printf "127.0.0.1 localhost\n127.0.1.1 zbox\n::1 localhost ip6-localhost ip6-loopback\n" > /r/etc/hosts
-  echo zbox > /r/etc/hostname
+  printf "127.0.0.1 localhost\n127.0.1.1 kvbox\n::1 localhost ip6-localhost ip6-loopback\n" > /r/etc/hosts
+  echo kvbox > /r/etc/hostname
   rm -f /out/rootfs.ext4.tmp
   truncate -s "$SIZE" /out/rootfs.ext4.tmp
-  mkfs.ext4 -q -F -L zbox-root -d /r /out/rootfs.ext4.tmp
+  mkfs.ext4 -q -F -L kvbox-root -d /r /out/rootfs.ext4.tmp
   e2fsck -fn /out/rootfs.ext4.tmp >/dev/null
   mv /out/rootfs.ext4.tmp /out/rootfs.ext4
   chown "$UID_GID" /out/rootfs.ext4

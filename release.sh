@@ -23,11 +23,11 @@ rm -rf "$rel" && mkdir -p "$rel"
 cp "$here/$image/out/rootfs.ext4.zst" "$rel/$asset"
 (cd "$rel" && sha256sum "$asset" > "$asset.sha256")
 
-notes="$(printf '%s image %s for %s.\n\nInstall with zbox: `install.sh` downloads this asset, verifies the checksum and unpacks it to `~/.zbox/assets/rootfs.ext4`.\n\n```\nROOTFS_VERSION=%s ./install.sh\n```' "$image" "$version" "$arch" "$version")"
+notes="$(printf '%s image %s for %s.\n\nInstall with kvbox: `install.sh` downloads this asset, verifies the checksum and unpacks it to `~/.kvbox/assets/rootfs.ext4`.\n\n```\nROOTFS_VERSION=%s ./install.sh\n```' "$image" "$version" "$arch" "$version")"
 
-if gh release view "$tag" --repo ghalex/zbox-images >/dev/null 2>&1; then
-  gh release upload "$tag" "$rel/$asset" "$rel/$asset.sha256" --clobber --repo ghalex/zbox-images
+if gh release view "$tag" --repo ghalex/kvbox-images >/dev/null 2>&1; then
+  gh release upload "$tag" "$rel/$asset" "$rel/$asset.sha256" --clobber --repo ghalex/kvbox-images
 else
-  gh release create "$tag" "$rel/$asset" "$rel/$asset.sha256" --repo ghalex/zbox-images --title "$tag" --notes "$notes"
+  gh release create "$tag" "$rel/$asset" "$rel/$asset.sha256" --repo ghalex/kvbox-images --title "$tag" --notes "$notes"
 fi
 echo "published $tag: $asset"
