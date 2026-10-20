@@ -9,7 +9,7 @@
 # file: 2 GiB of disk, a few hundred MB on the host.
 #
 # Boot it with (install.sh / kvbox fill these in):
-#   console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw
+#   console=ttyS0 reboot=k panic=1          (Firecracker appends pci=off root=/dev/vda rw itself)
 #   ip=<ip>::<gw>:255.255.255.0::eth0:off kvbox.name=<name> kvbox.sshkey=<base64 pubkey>
 set -euo pipefail
 

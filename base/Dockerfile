@@ -25,5 +25,7 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     # Generated on first boot too.
     && : > /etc/machine-id \
     && systemctl enable ssh.service kvbox-init.service \
-    && systemctl disable systemd-resolved.service systemd-timesyncd.service apt-daily.timer apt-daily-upgrade.timer e2scrub_all.timer 2>/dev/null || true \
-    && systemctl mask systemd-resolved.service
+    # Mask, don't disable: presets re-enable disabled units on first boot (seen in spike #4).
+    && systemctl mask systemd-resolved.service systemd-timesyncd.service \
+         apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer \
+         e2scrub_all.timer e2scrub_reap.service motd-news.timer
