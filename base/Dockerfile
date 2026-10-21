@@ -79,7 +79,7 @@ RUN ln -s /home/kvbox/.local/bin/claude /usr/local/bin/claude \
 
 COPY rootfs/ /
 RUN chmod 0440 /etc/sudoers.d/kvbox \
-    && chmod 0755 /usr/local/sbin/kvbox-init /sbin/overlay-init \
+    && chmod 0755 /usr/local/sbin/kvbox-init /usr/local/sbin/kvbox-agent /sbin/overlay-init \
     # Mount points overlay-init needs: the box disk, and where the base image ends up after the
     # overlay becomes the root.
     && mkdir -p /overlay /rom \
@@ -91,7 +91,7 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     # and give the guest a sane default locale (kvbox issue #24).
     && sed -i 's/^AcceptEnv LANG LC_\*/#&/' /etc/ssh/sshd_config \
     && printf 'LANG=C.UTF-8\n' > /etc/default/locale \
-    && systemctl enable ssh.service kvbox-init.service \
+    && systemctl enable ssh.service kvbox-init.service kvbox-agent.service \
     # Docker starts on the first `docker` command (socket activation), not at boot: keeps boot fast.
     && systemctl enable docker.socket && systemctl disable docker.service containerd.service \
     # Mask, don't disable: presets re-enable disabled units on first boot (seen in spike #4).

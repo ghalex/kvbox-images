@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# kvbox-agent: the host's control channel into a box, over vsock (no network involved, so it
+# works whatever the box did to its own networking). One JSON object per line, one request per
+# connection:
+#
+#   {"op": "ping"}                      -> {"ok": true, "name": "<hostname>"}
+#   {"op": "identity", "name": "box2", "ip": "172.30.0.3", "prefixLen": 24, "gateway": "172.30.0.1",
+#    "mac": "06:00:AC:1E:00:03", "time": 1760000000}
+#                                       -> {"ok": true}
+#
+# "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
+# box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
+# who it is now before plugging its network cable in. Errors come back as {"ok": false, "error"}.
+import json
+import socket
+import subprocess
+import sys
+import time
+
+PORT = 52
+IFACE = "eth0"
+
+
+def log(msg):
+    print(f"kvbox-agent: {msg}", file=sys.stderr, flush=True)
+
+
+def sh(*argv):
+    subprocess.run(argv, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def set_hostname(name):
+    with open("/etc/hostname", "w") as f:
+        f.write(name + "\n")
+    sh("hostname", name)
+    with open("/etc/hosts") as f:
+        lines = f.read().splitlines()
+    out = [f"127.0.1.1 {name}" if line.startswith("127.0.1.1") else line for line in lines]
+    if not any(line.startswith("127.0.1.1") for line in out):
+        out.append(f"127.0.1.1 {name}")
+    with open("/etc/hosts", "w") as f:
+        f.write("\n".join(out) + "\n")
+
+
+def set_network(ip, prefix_len, gateway, mac):
+    # The link goes down for the MAC change; IPv6 link-local is regenerated from the new MAC on the way up.
+    sh("ip", "link", "set", IFACE, "down")
+    sh("ip", "link", "set", IFACE, "address", mac)
+    sh("ip", "-4", "addr", "flush", "dev", IFACE)
+    sh("ip", "link", "set", IFACE, "up")
+    sh("ip", "addr", "add", f"{ip}/{prefix_len}", "dev", IFACE)
+    sh("ip", "route", "replace", "default", "via", gateway, "dev", IFACE)
+
+
+def set_time(epoch):
+    sh("date", "-s", f"@{int(epoch)}")
+
+
+def handle(req):
+    op = req.get("op")
+    if op == "ping":
+        return {"ok": True, "name": socket.gethostname()}
+    if op == "identity":
+        set_hostname(req["name"])
+        set_network(req["ip"], int(req.get("prefixLen", 24)), req["gateway"], req["mac"])
+        if "time" in req:
+            set_time(req["time"])
+        log(f"now {req['name']} at {req['ip']} ({req['mac']})")
+        return {"ok": True}
+    raise ValueError(f"unknown op {op!r}")
+
+
+def serve(conn):
+    with conn, conn.makefile("rb") as rd, conn.makefile("wb") as wr:
+        line = rd.readline()
+        if not line:
+            return
+        try:
+            reply = handle(json.loads(line))
+        except subprocess.CalledProcessError as e:
+            reply = {"ok": False, "error": f"{' '.join(e.cmd)}: {e.stderr.strip()}"}
+        except Exception as e:  # noqa: BLE001 - report anything to the host rather than die
+            reply = {"ok": False, "error": str(e)}
+        wr.write(json.dumps(reply).encode() + b"\n")
+        wr.flush()
+
+
+def main():
+    srv = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    srv.bind((socket.VMADDR_CID_ANY, PORT))
+    srv.listen(8)
+    log(f"listening on vsock port {PORT}")
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError as e:
+            log(f"accept: {e}")
+            time.sleep(0.1)
+            continue
+        try:
+            serve(conn)
+        except OSError as e:
+            log(f"connection: {e}")
+
+
+if __name__ == "__main__":
+    main()

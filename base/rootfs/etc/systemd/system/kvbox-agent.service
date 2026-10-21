@@ -1,0 +1,12 @@
+[Unit]
+Description=kvbox host control channel over vsock
+After=kvbox-init.service
+Before=ssh.service
+
+[Service]
+ExecStart=/usr/local/sbin/kvbox-agent
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

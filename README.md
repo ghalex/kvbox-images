@@ -28,6 +28,15 @@ public key (`kvbox.sshkey=`, base64) on the kernel command line, and a
 first-boot `kvbox-init.service` applies them and generates per-box SSH host
 keys before sshd starts. One image serves every host and user.
 
+A box restored from a snapshot (`kvbox new --from`) wakes up with the source
+box's name, address and clock still in memory, so the image also runs
+`kvbox-agent.service`: a small Python service listening on vsock port 52 (a
+direct host-to-guest channel, independent of the box's network). kvbox connects
+to it right after the restore and sends one JSON line with the new identity
+(`{"op": "identity", "name", "ip", "prefixLen", "gateway", "mac", "time"}`); the
+agent renames the box, re-addresses `eth0` and sets the clock, then answers
+`{"ok": true}`. `{"op": "ping"}` answers with the hostname.
+
 One image file also serves every box on a host: kvbox attaches it read-only
 as `/dev/vda` and gives each box its own small ext4 as `/dev/vdb`. The kernel
 starts `/sbin/overlay-init` (`init=/sbin/overlay-init kvbox.overlay=/dev/vdb`),

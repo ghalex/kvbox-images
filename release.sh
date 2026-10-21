@@ -26,7 +26,7 @@ rel="$here/$image/out/release"
 assets=("$rel"/*)
 
 case "$image" in
-  base)   what="Base guest image $version ($arch): Ubuntu 24.04 with Python 3, Node.js 22, Docker and Claude Code."
+  base)   what="Base guest image $version ($arch): Ubuntu 24.04 with Python 3, Node.js 22, Docker, Claude Code and kvbox-agent (vsock control channel for snapshot restores)."
           how="ROOTFS_VERSION=$version ./install-server.sh" ;;
   kernel) what="Guest kernel $version ($arch): Linux $(cat "$here/kernel/out/vmlinux.version") with Firecracker's CI config plus kernel/kvbox.config (netfilter for Docker, nf_tables, FUSE)."
           how="KERNEL_VERSION=${version#v} ./install-server.sh" ;;
