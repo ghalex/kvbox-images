@@ -1,0 +1,42 @@
+#!/bin/sh
+# kvbox overlay-init: runs as the very first process (kernel arg init=/sbin/overlay-init) and
+# makes the shared, read-only base image writable for this one box.
+#
+# The kernel mounts the base image (root=/dev/vda ro). kvbox.overlay=<device> on the command
+# line names the box's own disk, a plain ext4 that holds everything this box changes. We mount
+# it, stack an overlayfs (lower = base, upper = box disk) and make that the root, then hand over
+# to systemd. Without kvbox.overlay= the image boots the old way, straight from its root.
+#
+# Docker and containerd keep image layers as overlayfs mounts of their own, which cannot sit on
+# an overlayfs, so /var/lib/docker and /var/lib/containerd are bound to plain directories on the
+# box disk instead of living in the upper layer.
+set -eu
+
+mount -t proc proc /proc
+overlay=""
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    kvbox.overlay=*) overlay="${arg#kvbox.overlay=}" ;;
+  esac
+done
+umount /proc
+
+if [ -z "$overlay" ]; then
+  exec /sbin/init "$@"
+fi
+
+if [ ! -b "$overlay" ]; then
+  echo "overlay-init: box disk $overlay is not a block device; cannot boot" >&2
+  exit 1
+fi
+
+mount -t ext4 "$overlay" /overlay
+mkdir -p /overlay/upper /overlay/work /overlay/docker /overlay/containerd
+mount -t overlay overlay -o lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work /mnt
+cd /mnt
+pivot_root . rom
+cd /
+mkdir -p /var/lib/docker /var/lib/containerd
+mount --bind /rom/overlay/docker /var/lib/docker
+mount --bind /rom/overlay/containerd /var/lib/containerd
+exec /sbin/init "$@"

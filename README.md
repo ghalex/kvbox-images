@@ -28,6 +28,17 @@ public key (`kvbox.sshkey=`, base64) on the kernel command line, and a
 first-boot `kvbox-init.service` applies them and generates per-box SSH host
 keys before sshd starts. One image serves every host and user.
 
+One image file also serves every box on a host: kvbox attaches it read-only
+as `/dev/vda` and gives each box its own small ext4 as `/dev/vdb`. The kernel
+starts `/sbin/overlay-init` (`init=/sbin/overlay-init kvbox.overlay=/dev/vdb`),
+which stacks the box disk on the base as an overlayfs, makes that the root and
+only then starts systemd. Everything the box writes lands on its own disk; the
+base is never modified, so a new box costs a few MB instead of a copy of the
+image. Docker's storage lives in a plain directory of the box disk (bind-mounted
+to `/var/lib/docker`) because overlay2 cannot run on top of an overlayfs.
+Booted without `kvbox.overlay=`, the image works the old way, as a plain
+writable root.
+
 ## Build
 
 Needs Docker; no root and no loop mount on the host.
@@ -52,7 +63,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ## Release
 
 ```
-./release.sh base v0.3.0        # builds, then publishes release base-v0.3.0
+./release.sh base v0.4.0        # builds, then publishes release base-v0.4.0
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ```
 

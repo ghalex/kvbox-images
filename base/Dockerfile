@@ -79,7 +79,10 @@ RUN ln -s /home/kvbox/.local/bin/claude /usr/local/bin/claude \
 
 COPY rootfs/ /
 RUN chmod 0440 /etc/sudoers.d/kvbox \
-    && chmod 0755 /usr/local/sbin/kvbox-init \
+    && chmod 0755 /usr/local/sbin/kvbox-init /sbin/overlay-init \
+    # Mount points overlay-init needs: the box disk, and where the base image ends up after the
+    # overlay becomes the root.
+    && mkdir -p /overlay /rom \
     # Host keys are generated per box on first boot, never shared across boxes.
     && rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub \
     # Generated on first boot too.

@@ -1,1 +1,3 @@
-/dev/vda / ext4 defaults 0 1
+# The root filesystem is set up before systemd starts (see /sbin/overlay-init): the base image
+# is mounted read-only by the kernel and the box's own disk is stacked on top of it as an
+# overlay, so nothing is listed here.
