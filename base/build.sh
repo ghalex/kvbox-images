@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the kvbox base image: base/out/rootfs.ext4 (+ .sha256, + .zst for releases).
+# Build the kvbox base image: base/out/rootfs.ext4 (+ .sha256, + .zst) and base/out/release/ assets.
 #
 #   base/build.sh                   # needs Docker; no root on the host
-#   ROOTFS_SIZE=8G base/build.sh
+#   ROOTFS_SIZE=16G base/build.sh
 #
 # Flow: docker build → docker export → mkfs.ext4 -d inside a container (so file
 # ownership and modes survive without a loop mount). The output is a sparse
-# file: 4 GiB of disk, a few hundred MB on the host.
+# file: 8 GiB of disk, about 1.2 GB on the host.
 #
 # Boot it with (install.sh / kvbox fill these in):
 #   console=ttyS0 reboot=k panic=1          (Firecracker appends pci=off root=/dev/vda rw itself)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="$here/out"
-size="${ROOTFS_SIZE:-4G}"
+size="${ROOTFS_SIZE:-8G}"
 tag="kvbox-base:local"
 
 if [[ -t 1 ]]; then BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; NC=$'\033[0m'; else BOLD=""; GREEN=""; RED=""; NC=""; fi
@@ -65,9 +65,14 @@ step "Checksums and compressed copy"
 if command -v zstd >/dev/null 2>&1; then
   zstd -q -f -T0 -19 --sparse "$out/rootfs.ext4" -o "$out/rootfs.ext4.zst"
   (cd "$out" && sha256sum rootfs.ext4.zst > rootfs.ext4.zst.sha256)
-  ok "rootfs.ext4.zst: $(du -h "$out/rootfs.ext4.zst" | cut -f1) (release asset)"
+  # Release assets, named as install-server.sh downloads them.
+  rel="$out/release"; asset="rootfs-base-$(uname -m).ext4.zst"
+  rm -rf "$rel" && mkdir -p "$rel"
+  cp "$out/rootfs.ext4.zst" "$rel/$asset"
+  (cd "$rel" && sha256sum "$asset" > "$asset.sha256")
+  ok "$asset: $(du -h "$rel/$asset" | cut -f1) (release asset in $rel)"
 else
-  echo "zstd not found; skipping the compressed copy"
+  echo "zstd not found; skipping the compressed copy and release assets"
 fi
 
 echo
