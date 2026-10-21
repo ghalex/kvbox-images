@@ -6,7 +6,7 @@
 #
 # Flow: docker build → docker export → mkfs.ext4 -d inside a container (so file
 # ownership and modes survive without a loop mount). The output is a sparse
-# file: 8 GiB of disk, about 1.2 GB on the host.
+# file: 8 GiB of disk, about 1.9 GB on the host.
 #
 # Boot it with (install.sh / kvbox fill these in):
 #   console=ttyS0 reboot=k panic=1          (Firecracker appends pci=off root=/dev/vda rw itself)

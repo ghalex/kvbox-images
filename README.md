@@ -7,7 +7,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 
 | Image | Release tag | Contents |
 |---|---|---|
-| `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, Node.js 22 (npm), Docker Engine, Claude Code CLI |
+| `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
 ## Why our own kernel
@@ -33,7 +33,7 @@ keys before sshd starts. One image serves every host and user.
 Needs Docker; no root and no loop mount on the host.
 
 ```
-base/build.sh                 # -> base/out/rootfs.ext4 (8 GiB sparse, ~1.2 GB used), .sha256, .zst
+base/build.sh                 # -> base/out/rootfs.ext4 (8 GiB sparse, ~1.9 GB used), .sha256, .zst
 ROOTFS_SIZE=16G base/build.sh # larger disk
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 ```
@@ -52,7 +52,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ## Release
 
 ```
-./release.sh base v0.2.0        # builds, then publishes release base-v0.2.0
+./release.sh base v0.3.0        # builds, then publishes release base-v0.3.0
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ```
 
