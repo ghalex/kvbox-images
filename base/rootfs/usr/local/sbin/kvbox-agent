@@ -7,11 +7,18 @@
 #   {"op": "identity", "name": "box2", "ip": "172.30.0.3", "prefixLen": 24, "gateway": "172.30.0.1",
 #    "mac": "06:00:AC:1E:00:03", "time": 1760000000}
 #                                       -> {"ok": true}
+#   {"op": "authorizedKeys", "lines": ["ssh-ed25519 AAAA… host", "cert-authority,… AAAA…"]}
+#                                       -> {"ok": true, "lines": 2}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
-# who it is now before plugging its network cable in. Errors come back as {"ok": false, "error"}.
+# who it is now before plugging its network cable in. "authorizedKeys" replaces the kvbox user's
+# authorized_keys with exactly these lines: a restored or woken box has the file it was frozen
+# with, and the host has the current one (its own key plus the lines the control plane gave the
+# box, which change when the SSH CA does). Errors come back as {"ok": false, "error"}.
 import json
+import os
+import pwd
 import socket
 import subprocess
 import sys
@@ -19,6 +26,7 @@ import time
 
 PORT = 52
 IFACE = "eth0"
+SSH_USER = "kvbox"
 
 
 def log(msg):
@@ -56,6 +64,23 @@ def set_time(epoch):
     sh("date", "-s", f"@{int(epoch)}")
 
 
+def set_authorized_keys(lines):
+    if not isinstance(lines, list) or not lines or not all(isinstance(l, str) and l.strip() and "\n" not in l for l in lines):
+        raise ValueError("authorizedKeys: 'lines' must be a non-empty list of single-line strings")
+    user = pwd.getpwnam(SSH_USER)
+    ssh_dir = os.path.join(user.pw_dir, ".ssh")
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+    os.chown(ssh_dir, user.pw_uid, user.pw_gid)
+    path = os.path.join(ssh_dir, "authorized_keys")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("".join(line.strip() + "\n" for line in lines))
+    os.chmod(tmp, 0o600)
+    os.chown(tmp, user.pw_uid, user.pw_gid)
+    os.replace(tmp, path)
+    return len(lines)
+
+
 def handle(req):
     op = req.get("op")
     if op == "ping":
@@ -67,6 +92,10 @@ def handle(req):
             set_time(req["time"])
         log(f"now {req['name']} at {req['ip']} ({req['mac']})")
         return {"ok": True}
+    if op == "authorizedKeys":
+        n = set_authorized_keys(req.get("lines"))
+        log(f"authorized_keys of {SSH_USER} replaced ({n} lines)")
+        return {"ok": True, "lines": n}
     raise ValueError(f"unknown op {op!r}")
 
 

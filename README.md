@@ -36,6 +36,11 @@ to it right after the restore and sends one JSON line with the new identity
 (`{"op": "identity", "name", "ip", "prefixLen", "gateway", "mac", "time"}`); the
 agent renames the box, re-addresses `eth0` and sets the clock, then answers
 `{"ok": true}`. `{"op": "ping"}` answers with the hostname.
+`{"op": "authorizedKeys", "lines": [...]}` replaces the `kvbox` user's
+`authorized_keys` with exactly those lines (base v0.6.0 and later): a restored
+or woken box has the file it was frozen with, and the host sends the current
+one, its own key plus the lines the control plane gave the box, so a new SSH
+CA reaches a box without a cold boot.
 
 One image file also serves every box on a host: kvbox attaches it read-only
 as `/dev/vda` and gives each box its own small ext4 as `/dev/vdb`. The kernel
