@@ -9,13 +9,19 @@
 #                                       -> {"ok": true}
 #   {"op": "authorizedKeys", "lines": ["ssh-ed25519 AAAA… host", "cert-authority,… AAAA…"]}
 #                                       -> {"ok": true, "lines": 2}
+#   {"op": "stats"}                     -> {"ok": true, "load": [0.12, 0.08, 0.01], "cpus": 2,
+#                                           "memTotalMib": 3920, "memUsedMib": 412,
+#                                           "diskTotalBytes": 8350000000, "diskUsedBytes": 2100000000,
+#                                           "uptimeSec": 5321}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
 # who it is now before plugging its network cable in. "authorizedKeys" replaces the kvbox user's
 # authorized_keys with exactly these lines: a restored or woken box has the file it was frozen
 # with, and the host has the current one (its own key plus the lines the control plane gave the
-# box, which change when the SSH CA does). Errors come back as {"ok": false, "error"}.
+# box, which change when the SSH CA does). "stats" is what `kvbox vm top` shows: the box's own load,
+# memory (used = total - available, so page cache counts as free) and root disk, from /proc and
+# statvfs only, no subprocess. Errors come back as {"ok": false, "error"}.
 import json
 import os
 import pwd
@@ -81,6 +87,31 @@ def set_authorized_keys(lines):
     return len(lines)
 
 
+def stats():
+    with open("/proc/loadavg") as f:
+        load = [float(x) for x in f.read().split()[:3]]
+    mem = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            mem[key] = int(rest.split()[0])  # kB
+    total = mem["MemTotal"]
+    avail = mem.get("MemAvailable", mem.get("MemFree", 0))
+    fs = os.statvfs("/")
+    with open("/proc/uptime") as f:
+        uptime = float(f.read().split()[0])
+    return {
+        "ok": True,
+        "load": load,
+        "cpus": os.cpu_count() or 1,
+        "memTotalMib": total // 1024,
+        "memUsedMib": (total - avail) // 1024,
+        "diskTotalBytes": fs.f_blocks * fs.f_frsize,
+        "diskUsedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize,
+        "uptimeSec": int(uptime),
+    }
+
+
 def handle(req):
     op = req.get("op")
     if op == "ping":
@@ -96,6 +127,8 @@ def handle(req):
         n = set_authorized_keys(req.get("lines"))
         log(f"authorized_keys of {SSH_USER} replaced ({n} lines)")
         return {"ok": True, "lines": n}
+    if op == "stats":
+        return stats()
     raise ValueError(f"unknown op {op!r}")
 
 

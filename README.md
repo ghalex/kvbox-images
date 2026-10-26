@@ -41,6 +41,10 @@ agent renames the box, re-addresses `eth0` and sets the clock, then answers
 or woken box has the file it was frozen with, and the host sends the current
 one, its own key plus the lines the control plane gave the box, so a new SSH
 CA reaches a box without a cold boot.
+`{"op": "stats"}` (base v0.7.0 and later) answers with the box's own load
+average, CPU count, memory (used is total minus available), root disk (the
+overlay, so the box's own writes) and uptime, read from `/proc` and `statvfs`;
+`kvbox vm top` shows it.
 
 One image file also serves every box on a host: kvbox attaches it read-only
 as `/dev/vda` and gives each box its own small ext4 as `/dev/vdb`. The kernel
