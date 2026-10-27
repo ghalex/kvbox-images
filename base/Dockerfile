@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       e2fsprogs \
       less nano unzip \
       gnupg \
+      nginx \
       python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -79,6 +80,12 @@ RUN ln -s /home/kvbox/.local/bin/claude /usr/local/bin/claude \
 
 COPY rootfs/ /
 RUN chmod 0440 /etc/sudoers.d/kvbox \
+    # nginx serves /srv/app/dist for `kvbox deploy`: the site is wired, the service stays off until a
+    # deploy turns it on. /srv/app belongs to kvbox so a deploy writes there without sudo.
+    && rm -f /etc/nginx/sites-enabled/default \
+    && ln -s /etc/nginx/sites-available/kvbox-app /etc/nginx/sites-enabled/kvbox-app \
+    && mkdir -p /srv/app && chown kvbox:kvbox /srv/app \
+    && systemctl disable nginx.service \
     && chmod 0755 /usr/local/sbin/kvbox-init /usr/local/sbin/kvbox-agent /sbin/overlay-init \
     # Mount points overlay-init needs: the box disk, and where the base image ends up after the
     # overlay becomes the root.

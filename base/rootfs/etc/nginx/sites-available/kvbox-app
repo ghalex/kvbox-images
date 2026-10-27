@@ -1,0 +1,23 @@
+# The one site in the image: a static app at /srv/app/dist on port 80, for `kvbox deploy`.
+# A single-page app routes in the browser, so an unknown path serves index.html.
+# nginx is off until a deploy enables it (systemctl enable --now nginx).
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /srv/app/dist;
+    index index.html;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+
+    # Hashed build assets never change: let browsers keep them.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
