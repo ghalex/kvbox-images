@@ -2,7 +2,7 @@
 # kvbox-volumes: mount the box's volumes at boot (kvbox issue #52).
 #
 # A volume is an extra virtio disk the host attached (/dev/vdc and up; vda is the base image, vdb
-# the box's own disk), formatted ext4 on the host with the label "kvbox:<name>". Each one is
+# the box's own disk), formatted ext4 on the host with the label "kv:<name>" (ext4 labels are 16 bytes, hence the short prefix). Each one is
 # mounted at /mnt/<name>, owned by the kvbox user. A disk without that label is left alone, and a
 # volume that fails to mount is logged and skipped: the box still has to boot and sshd to start.
 #
@@ -15,8 +15,8 @@ for dev in /dev/vd*; do
   [ -b "$dev" ] || continue
   case "$dev" in /dev/vda | /dev/vdb) continue ;; esac
   label="$(blkid -s LABEL -o value "$dev" 2>/dev/null || true)"
-  case "$label" in kvbox:*) ;; *) continue ;; esac
-  name="${label#kvbox:}"
+  case "$label" in kv:*) ;; *) continue ;; esac
+  name="${label#kv:}"
   case "$name" in "" | */* | .* ) echo "kvbox-volumes: $dev has an unusable label '$label', skipped" >&2; continue ;; esac
   dir="/mnt/$name"
   mkdir -p "$dir"

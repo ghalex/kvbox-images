@@ -51,8 +51,8 @@ restored from a snapshot has the source box's mounts in memory, but the host
 gives it an empty placeholder disk instead of the volume, so the mounts are dead.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
-up, formatted ext4 on the host with the label `kvbox:<name>`. At boot
-`kvbox-volumes.service` (base v0.9.0 and later) mounts each labelled disk at
+up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot
+`kvbox-volumes.service` (base v0.9.1 and later) mounts each labelled disk at
 `/mnt/<name>`, owned by the `kvbox` user; nothing is written to fstab, since
 which volumes a box has is the host's knowledge, sent as drives at every boot.
 
