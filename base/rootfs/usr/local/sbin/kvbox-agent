@@ -13,6 +13,7 @@
 #                                           "memTotalMib": 3920, "memUsedMib": 412,
 #                                           "diskTotalBytes": 8350000000, "diskUsedBytes": 2100000000,
 #                                           "uptimeSec": 5321}
+#   {"op": "dropVolumes"}               -> {"ok": true, "dropped": ["/mnt/data"]}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -21,10 +22,15 @@
 # with, and the host has the current one (its own key plus the lines the control plane gave the
 # box, which change when the SSH CA does). "stats" is what `kvbox vm top` shows: the box's own load,
 # memory (used = total - available, so page cache counts as free) and root disk, from /proc and
-# statvfs only, no subprocess. Errors come back as {"ok": false, "error"}.
+# statvfs only, no subprocess. "dropVolumes" is for a box restored from a snapshot that had a volume
+# attached (kvbox issue #52): the memory image still has it mounted, but the disk under it is now an
+# empty placeholder, so every mount of an extra disk (/dev/vdc and up) is force-unmounted, deepest
+# first; lazy, so a process holding a file there gets an error instead of blocking the unmount.
+# Errors come back as {"ok": false, "error"}.
 import json
 import os
 import pwd
+import re
 import socket
 import subprocess
 import sys
@@ -112,6 +118,18 @@ def stats():
     }
 
 
+VOLUME_DEV = re.compile(r"^/dev/vd[c-z]+$")  # vda is the base image, vdb the box's own disk
+
+
+def drop_volumes():
+    with open("/proc/mounts") as f:
+        mounts = [line.split()[:2] for line in f]
+    targets = sorted((m[1] for m in mounts if VOLUME_DEV.match(m[0])), key=len, reverse=True)
+    for target in targets:
+        sh("umount", "-f", "-l", target)
+    return targets
+
+
 def handle(req):
     op = req.get("op")
     if op == "ping":
@@ -129,6 +147,11 @@ def handle(req):
         return {"ok": True, "lines": n}
     if op == "stats":
         return stats()
+    if op == "dropVolumes":
+        dropped = drop_volumes()
+        if dropped:
+            log(f"volume mounts dropped: {', '.join(dropped)}")
+        return {"ok": True, "dropped": dropped}
     raise ValueError(f"unknown op {op!r}")
 
 

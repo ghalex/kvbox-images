@@ -45,6 +45,16 @@ CA reaches a box without a cold boot.
 average, CPU count, memory (used is total minus available), root disk (the
 overlay, so the box's own writes) and uptime, read from `/proc` and `statvfs`;
 `kvbox vm top` shows it.
+`{"op": "dropVolumes"}` (base v0.9.0 and later) force-unmounts every volume
+(see below) the box still has mounted and answers with the paths: a box
+restored from a snapshot has the source box's mounts in memory, but the host
+gives it an empty placeholder disk instead of the volume, so the mounts are dead.
+
+A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
+up, formatted ext4 on the host with the label `kvbox:<name>`. At boot
+`kvbox-volumes.service` (base v0.9.0 and later) mounts each labelled disk at
+`/mnt/<name>`, owned by the `kvbox` user; nothing is written to fstab, since
+which volumes a box has is the host's knowledge, sent as drives at every boot.
 
 One image file also serves every box on a host: kvbox attaches it read-only
 as `/dev/vda` and gives each box its own small ext4 as `/dev/vdb`. The kernel

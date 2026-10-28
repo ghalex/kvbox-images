@@ -1,0 +1,30 @@
+#!/bin/sh
+# kvbox-volumes: mount the box's volumes at boot (kvbox issue #52).
+#
+# A volume is an extra virtio disk the host attached (/dev/vdc and up; vda is the base image, vdb
+# the box's own disk), formatted ext4 on the host with the label "kvbox:<name>". Each one is
+# mounted at /mnt/<name>, owned by the kvbox user. A disk without that label is left alone, and a
+# volume that fails to mount is logged and skipped: the box still has to boot and sshd to start.
+#
+# Nothing persists in fstab: which volumes a box has is the host's knowledge, sent as drives at
+# every boot. A snapshot restore does not run this (nothing boots); the host asks kvbox-agent to
+# drop whatever the memory image still had mounted ("dropVolumes").
+set -u
+
+for dev in /dev/vd*; do
+  [ -b "$dev" ] || continue
+  case "$dev" in /dev/vda | /dev/vdb) continue ;; esac
+  label="$(blkid -s LABEL -o value "$dev" 2>/dev/null || true)"
+  case "$label" in kvbox:*) ;; *) continue ;; esac
+  name="${label#kvbox:}"
+  case "$name" in "" | */* | .* ) echo "kvbox-volumes: $dev has an unusable label '$label', skipped" >&2; continue ;; esac
+  dir="/mnt/$name"
+  mkdir -p "$dir"
+  if mount -t ext4 -o noatime "$dev" "$dir"; then
+    chown kvbox:kvbox "$dir"
+    echo "kvbox-volumes: $name ($dev) mounted at $dir"
+  else
+    echo "kvbox-volumes: could not mount $name ($dev) at $dir" >&2
+  fi
+done
+exit 0
