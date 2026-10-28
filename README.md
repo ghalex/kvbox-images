@@ -49,6 +49,15 @@ overlay, so the box's own writes) and uptime, read from `/proc` and `statvfs`;
 (see below) the box still has mounted and answers with the paths: a box
 restored from a snapshot has the source box's mounts in memory, but the host
 gives it an empty placeholder disk instead of the volume, so the mounts are dead.
+`{"op": "env", "vars": [["NAME", "value"], ...]}` (base v0.10.0 and later)
+replaces the box owner's environment variables (kvbox issue #88), sent by the
+host at every boot and after a restore. The agent writes them twice, each in the
+form its reader takes literally: `/etc/kvbox/env` for systemd's
+`EnvironmentFile=` (double-quoted, `\` and `"` escaped; `kvbox deploy`'s
+`kvbox-app` unit reads it and is restarted when the list changed) and the
+`kvbox` user's `~/.ssh/environment` for sshd (`PermitUserEnvironment yes`), so
+every SSH session, `kvbox exec` included, has them. It answers with the count
+and whether anything changed. Values are single lines.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot

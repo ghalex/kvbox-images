@@ -14,6 +14,8 @@
 #                                           "diskTotalBytes": 8350000000, "diskUsedBytes": 2100000000,
 #                                           "uptimeSec": 5321}
 #   {"op": "dropVolumes"}               -> {"ok": true, "dropped": ["/mnt/data"]}
+#   {"op": "env", "vars": [["DB_URL", "postgres://…"], ["NODE_ENV", "production"]]}
+#                                       -> {"ok": true, "vars": 2, "changed": true}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -26,6 +28,13 @@
 # attached (kvbox issue #52): the memory image still has it mounted, but the disk under it is now an
 # empty placeholder, so every mount of an extra disk (/dev/vdc and up) is force-unmounted, deepest
 # first; lazy, so a process holding a file there gets an error instead of blocking the unmount.
+# "env" is the box owner's environment variables (kvbox issue #88), sent at every boot and after a
+# restore; the whole list replaces the previous one. Two files, one per reader, each in the only
+# form its reader takes literally: /etc/kvbox/env for systemd's EnvironmentFile= (double-quoted,
+# `\` and `"` escaped; the `kvbox-app` unit of `kvbox deploy` reads it and is restarted when the
+# list changed) and the kvbox user's ~/.ssh/environment for sshd (PermitUserEnvironment, plain
+# KEY=value, so `kvbox connect` and `kvbox exec` sessions get them). pam_env was ruled out: it cuts
+# a value at `#` even inside quotes. A value cannot hold a newline in either file.
 # Errors come back as {"ok": false, "error"}.
 import json
 import os
@@ -118,6 +127,49 @@ def stats():
     }
 
 
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENV_FILE = "/etc/kvbox/env"
+APP_SERVICE = "kvbox-app.service"
+
+
+def write_atomic(path, text, mode, uid=0, gid=0):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.chown(tmp, uid, gid)
+    os.replace(tmp, path)
+
+
+def systemd_quoted(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def set_env(pairs):
+    if not isinstance(pairs, list) or not all(
+        isinstance(p, list) and len(p) == 2 and isinstance(p[0], str) and ENV_NAME.match(p[0])
+        and isinstance(p[1], str) and "\n" not in p[1] and "\r" not in p[1] and "\0" not in p[1]
+        for p in pairs
+    ):
+        raise ValueError("env: 'vars' must be a list of [name, value] pairs, single-line values")
+    systemd = "".join(f'{k}="{systemd_quoted(v)}"\n' for k, v in pairs)
+    try:
+        with open(ENV_FILE) as f:
+            changed = f.read() != systemd
+    except FileNotFoundError:
+        changed = True
+    os.makedirs(os.path.dirname(ENV_FILE), mode=0o755, exist_ok=True)
+    write_atomic(ENV_FILE, systemd, 0o600)
+    user = pwd.getpwnam(SSH_USER)
+    ssh_dir = os.path.join(user.pw_dir, ".ssh")
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+    os.chown(ssh_dir, user.pw_uid, user.pw_gid)
+    write_atomic(os.path.join(ssh_dir, "environment"), "".join(f"{k}={v}\n" for k, v in pairs), 0o600, user.pw_uid, user.pw_gid)
+    if changed:
+        sh("systemctl", "try-restart", "--no-block", APP_SERVICE)
+    return len(pairs), changed
+
+
 VOLUME_DEV = re.compile(r"^/dev/vd[c-z]+$")  # vda is the base image, vdb the box's own disk
 
 
@@ -152,6 +204,10 @@ def handle(req):
         if dropped:
             log(f"volume mounts dropped: {', '.join(dropped)}")
         return {"ok": True, "dropped": dropped}
+    if op == "env":
+        n, changed = set_env(req.get("vars"))
+        log(f"environment: {n} variables{', changed' if changed else ''}")
+        return {"ok": True, "vars": n, "changed": changed}
     raise ValueError(f"unknown op {op!r}")
 
 

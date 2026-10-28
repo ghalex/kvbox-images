@@ -85,6 +85,8 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     && rm -f /etc/nginx/sites-enabled/default \
     && ln -s /etc/nginx/sites-available/kvbox-app /etc/nginx/sites-enabled/kvbox-app \
     && mkdir -p /srv/app && chown kvbox:kvbox /srv/app \
+    # kvbox-agent writes the box owner's environment variables here (kvbox #88).
+    && install -d -m 0755 /etc/kvbox \
     && systemctl disable nginx.service \
     && chmod 0755 /usr/local/sbin/kvbox-init /usr/local/sbin/kvbox-agent /usr/local/sbin/kvbox-volumes /sbin/overlay-init \
     # Mount points overlay-init needs: the box disk, and where the base image ends up after the
