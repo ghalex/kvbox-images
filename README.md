@@ -89,8 +89,8 @@ ROOTFS_SIZE=16G base/build.sh # larger disk
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 ```
 
-The image build runs `docker build`, `docker export`, then `mkfs.ext4 -d`
-inside a container so ownership, setuid bits and capabilities survive. The
+The image build (`lib/build-rootfs.sh`, shared by every rootfs image) runs
+`docker build`, `docker export`, then `mkfs.ext4 -d` inside a container so ownership, setuid bits and capabilities survive. The
 kernel build compiles inside a container too and copies out only `vmlinux`.
 Each build leaves its release assets in `<recipe>/out/release/`.
 
