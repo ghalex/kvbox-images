@@ -34,7 +34,8 @@
 # `\` and `"` escaped; the `kvbox-app` unit of `kvbox deploy` reads it and is restarted when the
 # list changed) and the kvbox user's ~/.ssh/environment for sshd (PermitUserEnvironment, plain
 # KEY=value, so `kvbox connect` and `kvbox exec` sessions get them). pam_env was ruled out: it cuts
-# a value at `#` even inside quotes. A value cannot hold a newline in either file.
+# a value at `#` even inside quotes. A value cannot hold a newline in either file. Every successful
+# "env" also touches /run/kvbox/env-ready (tmpfs, so absent at each boot until the first push).
 # Errors come back as {"ok": false, "error"}.
 import json
 import os
@@ -129,6 +130,9 @@ def stats():
 
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ENV_FILE = "/etc/kvbox/env"
+# Touched after every env push. /run is a tmpfs, so its absence means "no env yet this boot": a
+# unit that needs the owner's variables (the postgres image's kvbox-postgres-init, kvbox #87) waits for it.
+ENV_READY = "/run/kvbox/env-ready"
 APP_SERVICE = "kvbox-app.service"
 
 
@@ -167,6 +171,9 @@ def set_env(pairs):
     write_atomic(os.path.join(ssh_dir, "environment"), "".join(f"{k}={v}\n" for k, v in pairs), 0o600, user.pw_uid, user.pw_gid)
     if changed:
         sh("systemctl", "try-restart", "--no-block", APP_SERVICE)
+    os.makedirs(os.path.dirname(ENV_READY), mode=0o755, exist_ok=True)
+    with open(ENV_READY, "a"):
+        os.utime(ENV_READY)
     return len(pairs), changed
 
 

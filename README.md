@@ -57,7 +57,10 @@ form its reader takes literally: `/etc/kvbox/env` for systemd's
 `kvbox-app` unit reads it and is restarted when the list changed) and the
 `kvbox` user's `~/.ssh/environment` for sshd (`PermitUserEnvironment yes`), so
 every SSH session, `kvbox exec` included, has them. It answers with the count
-and whether anything changed. Values are single lines.
+and whether anything changed. Values are single lines. After every successful
+`env` the agent also touches `/run/kvbox/env-ready` (base v0.12.0 and later;
+`/run` is a tmpfs, so the file is absent at each boot until the host's first
+push): a unit that needs the owner's variables waits for it.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot
