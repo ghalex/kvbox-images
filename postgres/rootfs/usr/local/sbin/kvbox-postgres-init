@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# kvbox-postgres-init (kvbox #87): give Postgres the role, database and password the box owner asked
+# for, once per box. Run by kvbox-postgres-init.service, which is skipped once the marker exists.
+#
+# The host sends POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD (defaults and a generated password
+# filled in from /etc/kvbox/image.json) through kvbox-agent's "env" a few seconds after boot; the
+# agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. So: wait for that, read the three,
+# create the role (LOGIN, CREATEDB) unless it exists, set its password, create the database owned by
+# it unless it exists, then write the marker. Every step is idempotent, so an interrupted run is
+# simply redone at the next boot. Without a password nothing is done and no marker is written: a
+# later boot that has one retries.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/postgres-init.done
+WAIT_ENV=300   # seconds for the host's env push
+WAIT_PG=120    # seconds for the server to accept connections
+
+log() { echo "kvbox-postgres-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); role and database not created, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+PG_USER="" PG_PASSWORD="" PG_DB=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      POSTGRES_USER)     PG_USER="$(unquote "${BASH_REMATCH[2]}")" ;;
+      POSTGRES_PASSWORD) PG_PASSWORD="$(unquote "${BASH_REMATCH[2]}")" ;;
+      POSTGRES_DB)       PG_DB="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+PG_USER="${PG_USER:-postgres}"
+PG_DB="${PG_DB:-$PG_USER}"
+
+if [[ -z "$PG_PASSWORD" ]]; then
+  log "POSTGRES_PASSWORD is empty or missing in $ENV_FILE: no network login opened for role \"$PG_USER\"; retrying at next boot"
+  exit 1
+fi
+
+for ((i = 0; i < WAIT_PG; i++)); do
+  runuser -u postgres -- pg_isready -q && break
+  sleep 1
+done
+runuser -u postgres -- pg_isready -q || { log "gave up: postgres not accepting connections after ${WAIT_PG}s"; exit 1; }
+
+# The values reach psql through the environment (\getenv), never argv or this heredoc, and are
+# quoted by psql itself (:'v' literal, :"v" identifier; format %I/%L for the \gexec statements).
+log "role \"$PG_USER\", database \"$PG_DB\""
+KVBOX_PG_USER="$PG_USER" KVBOX_PG_PASSWORD="$PG_PASSWORD" KVBOX_PG_DB="$PG_DB" \
+  runuser -u postgres -- \
+  psql -X -q -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+\getenv u KVBOX_PG_USER
+\getenv p KVBOX_PG_PASSWORD
+\getenv d KVBOX_PG_DB
+SELECT format('CREATE ROLE %I LOGIN CREATEDB', :'u')
+  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'u') \gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', :'u', :'p') \gexec
+SELECT format('CREATE DATABASE %I OWNER %I', :'d', :'u')
+  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'d') \gexec
+SQL
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+log "done: role \"$PG_USER\" has its password, database \"$PG_DB\" exists"

@@ -8,6 +8,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | Image | Release tag | Contents |
 |---|---|---|
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
+| `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus Ubuntu's PostgreSQL (16 on 24.04) listening on every address, password (scram-sha-256) logins from anywhere; the role, database and password come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
 ## Why our own kernel
@@ -79,6 +80,49 @@ to `/var/lib/docker`) because overlay2 cannot run on top of an overlayfs.
 Booted without `kvbox.overlay=`, the image works the old way, as a plain
 writable root.
 
+## The postgres image
+
+`postgres/` (kvbox issue #87) is `FROM kvbox-base:local` plus Ubuntu's
+`postgresql` package. The cluster is created at build time with
+`listen_addresses = '*'` and `pg_hba.conf` allowing `host all all 0.0.0.0/0`
+and `::/0` with scram-sha-256: the host firewall decides who reaches a box
+(boxes are isolated unless linked). `postgresql.service` starts at boot.
+
+The image tells the host how to treat it in `/etc/kvbox/image.json`, which the
+host reads from the image file without booting it (`debugfs -R "cat
+/etc/kvbox/image.json"`); the base image has none:
+
+```json
+{
+  "autoHibernate": false,
+  "env": { "POSTGRES_USER": "postgres", "POSTGRES_DB": "${POSTGRES_USER}" },
+  "generate": ["POSTGRES_PASSWORD"],
+  "connect": "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${BOX}.kvbox:5432/${POSTGRES_DB}"
+}
+```
+
+- `autoHibernate`: whether the host may hibernate the box when idle.
+- `env`: defaults for variables the user did not give; a value may refer to
+  another variable as `${NAME}`.
+- `generate`: variables the host fills with a random password when the user
+  gave none.
+- `connect`: printed by the host after `kvbox new`, with `${...}` expanded
+  (`${BOX}` is the box name).
+
+So the box always receives `POSTGRES_USER`, `POSTGRES_DB` and
+`POSTGRES_PASSWORD` through kvbox-agent's `env`. `kvbox-postgres-init.service`
+runs at every boot until `/var/lib/kvbox/postgres-init.done` exists: it waits
+for `/run/kvbox/env-ready` (up to 5 minutes), reads the three variables from
+`/etc/kvbox/env` (parsed, never sourced), creates the role (`LOGIN CREATEDB`)
+unless it exists, sets its password, creates the database owned by it unless
+it exists, then writes the marker. Without a password it does nothing and
+leaves no marker, so a later boot retries. Its log is
+`journalctl -u kvbox-postgres-init`.
+
+```
+kvbox new mydb --base postgres -e POSTGRES_PASSWORD=x -e POSTGRES_USER=me -e POSTGRES_DB=app
+```
+
 ## Build
 
 Needs Docker; no root and no loop mount on the host.
@@ -86,6 +130,7 @@ Needs Docker; no root and no loop mount on the host.
 ```
 base/build.sh                 # -> base/out/rootfs.ext4 (8 GiB sparse, ~1.9 GB used), .sha256, .zst
 ROOTFS_SIZE=16G base/build.sh # larger disk
+postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Dockerfile first (kvbox-base:local)
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 ```
 
@@ -104,6 +149,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 
 ```
 ./release.sh base v0.4.0        # builds, then publishes release base-v0.4.0
+./release.sh postgres v0.1.0    # builds, then publishes release postgres-v0.1.0 (rootfs-postgres-<arch>.ext4.zst)
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ```
 

@@ -2,6 +2,7 @@
 # Build an image and publish it as a GitHub release of this repo.
 #
 #   ./release.sh base v0.1.0        # -> release "base-v0.1.0" with rootfs-base-<arch>.ext4.zst + .sha256
+#   ./release.sh postgres v0.1.0    # -> release "postgres-v0.1.0" with rootfs-postgres-<arch>.ext4.zst + .sha256
 #   ./release.sh kernel v6.1.190-1  # -> release "kernel-v6.1.190-1" with vmlinux-<arch> + .sha256
 #
 # <image>/build.sh builds and leaves the assets, named as install-server.sh expects them, in
@@ -28,6 +29,8 @@ assets=("$rel"/*)
 case "$image" in
   base)   what="Base guest image $version ($arch): Ubuntu 24.04 with Python 3, Node.js 22, Docker, nginx (for kvbox deploy), Claude Code and kvbox-agent (vsock control channel for snapshot restores)."
           how="ROOTFS_VERSION=$version ./install-server.sh" ;;
+  postgres) what="Postgres guest image $version ($arch): the base image plus Ubuntu's PostgreSQL $(docker run --rm kvbox-postgres:local ls /usr/lib/postgresql), listening on the box's IP; role, database and password from the box's POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD (kvbox #87)."
+          how="kvbox new mydb --base postgres -e POSTGRES_USER=me -e POSTGRES_DB=app" ;;
   kernel) what="Guest kernel $version ($arch): Linux $(cat "$here/kernel/out/vmlinux.version") with Firecracker's CI config plus kernel/kvbox.config (netfilter for Docker, nf_tables, FUSE)."
           how="KERNEL_VERSION=${version#v} ./install-server.sh" ;;
   *)      what="$image $version ($arch)."; how="./install-server.sh" ;;
