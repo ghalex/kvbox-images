@@ -50,7 +50,9 @@ docker run --rm -v "$out:/out" -e SIZE="$size" -e UID_GID="$(id -u):$(id -g)" "$
   # recovery on every boot). Same for anything else that says "container".
   rm -f /r/.dockerenv /r/.dockerinit /r/run/.containerenv
   # Docker bind-mounts these during build, so write them here instead of in the Dockerfile.
-  printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /r/etc/resolv.conf
+  # The host (the bridge gateway, kvbox's default 172.30.0.1) answers <box>.kvbox and refuses every other
+  # name, which sends the resolver straight to 1.1.1.1; if the host does not answer, 1 s later (kvbox #97).
+  printf "nameserver 172.30.0.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:1\n" > /r/etc/resolv.conf
   printf "127.0.0.1 localhost\n127.0.1.1 kvbox\n::1 localhost ip6-localhost ip6-loopback\n" > /r/etc/hosts
   echo kvbox > /r/etc/hostname
   rm -f /out/rootfs.ext4.tmp
