@@ -1,0 +1,14 @@
+# Once per box: register the GitHub Actions runner from the box owner's GITHUB_* variables (kvbox #100).
+# Not a oneshot, so waiting for the host's env push never holds up the boot.
+[Unit]
+Description=kvbox: register the GitHub Actions runner from the box owner's environment (once)
+ConditionPathExists=!/var/lib/kvbox/gh-runner-init.done
+Wants=network-online.target
+After=network-online.target kvbox-agent.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/kvbox-gh-runner-init
+
+[Install]
+WantedBy=multi-user.target

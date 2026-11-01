@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# kvbox-gh-runner-init (kvbox #100): register this box as a GitHub Actions runner, once per box. Run by
+# kvbox-gh-runner-init.service, which is skipped once the marker exists.
+#
+# The host sends GITHUB_URL, GITHUB_RUNNER_TOKEN, GITHUB_RUNNER_NAME and GITHUB_RUNNER_LABELS (the
+# labels' default from /etc/kvbox/image.json) through kvbox-agent's "env" a few seconds after boot; the
+# agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. So: wait for that, read them, run
+# config.sh as kvbox (unless the runner is already configured), install the runner's systemd service
+# (unless it is installed) and start it, then write the marker. The installed service is enabled, so
+# the runner comes back at every later boot without this script. Without a URL or a token nothing is
+# done and no marker is written: a later boot that has them retries. The registration token is
+# single-use and expires within an hour; once registered the runner never needs it again.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/gh-runner-init.done
+RUNNER_DIR=/home/kvbox/actions-runner
+WAIT_ENV=300   # seconds for the host's env push
+
+log() { echo "kvbox-gh-runner-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); runner not registered, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+URL="" TOKEN="" NAME="" LABELS=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      GITHUB_URL)           URL="$(unquote "${BASH_REMATCH[2]}")" ;;
+      GITHUB_RUNNER_TOKEN)  TOKEN="$(unquote "${BASH_REMATCH[2]}")" ;;
+      GITHUB_RUNNER_NAME)   NAME="$(unquote "${BASH_REMATCH[2]}")" ;;
+      GITHUB_RUNNER_LABELS) LABELS="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+NAME="${NAME:-$(hostname)}"
+LABELS="${LABELS:-kvbox}"
+URL="${URL%/}"
+
+cd "$RUNNER_DIR"
+
+if [[ -e .runner ]]; then
+  log "runner already configured, not registering again"
+else
+  missing=()
+  [[ -z "$URL" ]] && missing+=(GITHUB_URL)
+  [[ -z "$TOKEN" ]] && missing+=(GITHUB_RUNNER_TOKEN)
+  if (( ${#missing[@]} )); then
+    log "${missing[*]} missing in $ENV_FILE: runner not registered; set it (kvbox env set --box) and restart the box"
+    exit 1
+  fi
+  if [[ "$URL" != https://* ]]; then
+    log "GITHUB_URL must start with https:// (a repo, https://github.com/<owner>/<repo>, or an org, https://github.com/<org>): got \"$URL\""
+    exit 1
+  fi
+  log "registering runner \"$NAME\" (labels: $LABELS) at $URL"
+  # config.sh refuses to run as root. --replace takes over a runner of the same name (a box made again).
+  runuser -u kvbox -- ./config.sh --unattended --replace \
+    --url "$URL" --token "$TOKEN" --name "$NAME" --labels "$LABELS" --work _work
+fi
+
+# svc.sh writes the unit's name to .service; installing twice fails, so skip it when that is there.
+if [[ ! -e .service ]]; then
+  ./svc.sh install kvbox
+fi
+./svc.sh start
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+log "done: runner \"$NAME\" registered and started; it starts at every boot from now on"

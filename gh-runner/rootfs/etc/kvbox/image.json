@@ -1,0 +1,5 @@
+{
+  "autoHibernate": false,
+  "env": { "GITHUB_RUNNER_LABELS": "kvbox" },
+  "connect": "${GITHUB_URL}/settings/actions/runners"
+}

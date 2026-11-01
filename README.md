@@ -9,6 +9,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 |---|---|---|
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus Ubuntu's PostgreSQL (16 on 24.04) listening on every address, password (scram-sha-256) logins from anywhere; the role, database and password come from the box's environment (see [The postgres image](#the-postgres-image)) |
+| `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
 ## Why our own kernel
@@ -123,6 +124,39 @@ leaves no marker, so a later boot retries. Its log is
 kvbox new mydb --base postgres -e POSTGRES_PASSWORD=x -e POSTGRES_USER=me -e POSTGRES_DB=app
 ```
 
+## The gh-runner image
+
+`gh-runner/` (kvbox issue #100) is `FROM kvbox-base:local` plus GitHub's
+Actions runner (`ARG RUNNER_VERSION`, it updates itself after that), its
+dependencies (`bin/installdependencies.sh`) and a few tools GitHub's
+`ubuntu-latest` has and actions expect (`xz-utils zstd unzip zip jq`). Docker
+comes from base.
+
+```json
+{
+  "autoHibernate": false,
+  "env": { "GITHUB_RUNNER_LABELS": "kvbox" },
+  "connect": "${GITHUB_URL}/settings/actions/runners"
+}
+```
+
+`autoHibernate` is off: the runner keeps a long poll open to GitHub, so the
+box is never quiet anyway. `kvbox-gh-runner-init.service` runs at every boot
+until `/var/lib/kvbox/gh-runner-init.done` exists: it waits for
+`/run/kvbox/env-ready`, reads `GITHUB_URL`, `GITHUB_RUNNER_TOKEN` (the
+registration token from the repo's Settings → Actions → Runners → New
+self-hosted runner, single-use, valid for an hour), `GITHUB_RUNNER_NAME`
+(default: the box name) and `GITHUB_RUNNER_LABELS`, runs `config.sh
+--unattended --replace` as kvbox unless `.runner` exists, installs the runner's
+systemd service with `svc.sh` unless `.service` exists, starts it and writes
+the marker. The runner service is enabled, so it is back after every boot.
+Without a URL or token it does nothing and leaves no marker. Its log is
+`journalctl -u kvbox-gh-runner-init`.
+
+```
+kvbox new ci --base gh-runner -e GITHUB_URL=https://github.com/<owner>/<repo> -e GITHUB_RUNNER_TOKEN=<token>
+```
+
 ## Build
 
 Needs Docker; no root and no loop mount on the host.
@@ -131,6 +165,7 @@ Needs Docker; no root and no loop mount on the host.
 base/build.sh                 # -> base/out/rootfs.ext4 (8 GiB sparse, ~1.9 GB used), .sha256, .zst
 ROOTFS_SIZE=16G base/build.sh # larger disk
 postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Dockerfile first (kvbox-base:local)
+gh-runner/build.sh            # -> gh-runner/out/rootfs.ext4; same
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 ```
 
