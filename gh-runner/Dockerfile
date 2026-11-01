@@ -22,6 +22,6 @@ RUN install -d -o kvbox -g kvbox /home/kvbox/actions-runner \
     && test -x /home/kvbox/actions-runner/config.sh
 
 COPY rootfs/ /
-RUN chmod 0755 /usr/local/sbin/kvbox-gh-runner-init \
+RUN chmod 0755 /usr/local/sbin/kvbox-gh-runner-init /usr/local/sbin/kvbox-idle \
     && chmod 0644 /etc/kvbox/image.json \
     && systemctl enable kvbox-gh-runner-init.service

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# kvbox-idle (kvbox #102): whether this runner box is idle, for the host's auto-hibernate. kvbox-agent
+# runs it when the host asks ("idle", named in /etc/kvbox/image.json): exit 0 = idle, 1 = busy.
+# The runner's listener keeps a connection to GitHub open all the time, so network traffic says
+# nothing; a job runs in its own Runner.Worker process, which exists only while a job does.
+if pgrep -x Runner.Worker >/dev/null; then
+  exit 1
+fi
+exit 0

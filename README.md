@@ -109,6 +109,10 @@ host reads from the image file without booting it (`debugfs -R "cat
   gave none.
 - `connect`: printed by the host after `kvbox new`, with `${...}` expanded
   (`${BOX}` is the box name).
+- `idle` (optional, kvbox #102): a script in the box that exits 0 when the box
+  is idle; the host's auto-hibernate asks it (kvbox-agent's `idle`, base agent
+  from v0.12.0) instead of watching network traffic. `autoHibernate` may also
+  be a duration (`"10m"`), a new box's idle time.
 
 So the box always receives `POSTGRES_USER`, `POSTGRES_DB` and
 `POSTGRES_PASSWORD` through kvbox-agent's `env`. `kvbox-postgres-init.service`
@@ -134,14 +138,18 @@ comes from base.
 
 ```json
 {
-  "autoHibernate": false,
+  "autoHibernate": "10m",
+  "idle": "/usr/local/sbin/kvbox-idle",
   "env": { "GITHUB_RUNNER_LABELS": "kvbox" },
   "connect": "${GITHUB_URL}/settings/actions/runners"
 }
 ```
 
-`autoHibernate` is off: the runner keeps a long poll open to GitHub, so the
-box is never quiet anyway. `kvbox-gh-runner-init.service` runs at every boot
+The runner keeps a long poll open to GitHub, so network traffic never says
+the box is idle. `idle` (kvbox issue #102) names a script the host asks
+instead, through kvbox-agent's `idle` request: `kvbox-idle` exits 0 while no
+`Runner.Worker` process runs (one exists only during a job). `autoHibernate`
+gives a new box 10 minutes of that before it hibernates. `kvbox-gh-runner-init.service` runs at every boot
 until `/var/lib/kvbox/gh-runner-init.done` exists: it waits for
 `/run/kvbox/env-ready`, reads `GITHUB_URL`, `GITHUB_RUNNER_TOKEN` (the
 registration token from the repo's Settings → Actions → Runners → New
