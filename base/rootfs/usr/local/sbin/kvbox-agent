@@ -16,7 +16,8 @@
 #   {"op": "dropVolumes"}               -> {"ok": true, "dropped": ["/mnt/data"]}
 #   {"op": "env", "vars": [["DB_URL", "postgres://…"], ["NODE_ENV", "production"]]}
 #                                       -> {"ok": true, "vars": 2, "changed": true}
-#   {"op": "idle"}                      -> {"ok": true, "idle": true}
+#   {"op": "idle", "path": "/usr/local/sbin/kvbox-idle"}
+#                                       -> {"ok": true, "idle": true}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -37,11 +38,11 @@
 # KEY=value, so `kvbox connect` and `kvbox exec` sessions get them). pam_env was ruled out: it cuts
 # a value at `#` even inside quotes. A value cannot hold a newline in either file. Every successful
 # "env" also touches /run/kvbox/env-ready (tmpfs, so absent at each boot until the first push).
-# "idle" is for an image that decides itself when its box is idle (kvbox issue #102): the image's
-# /etc/kvbox/image.json names a script in "idle"; it is run (as root, at most IDLE_TIMEOUT seconds)
-# and exit 0 means idle, anything else busy. The host asks once a minute, only for a box whose image
-# declares one, and hibernates the box after its auto-hibernate time of idle answers in a row. The
-# path is read here, inside the box, so a box's owner may point it at their own script.
+# "idle" is for a box that decides itself when it is idle (kvbox issue #102): the host keeps the box's
+# idle check (its image's "idle" from /etc/kvbox/image.json by default, or one its owner set with
+# `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
+# and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
+# check, and hibernates it after its auto-hibernate time of idle answers in a row.
 # Errors come back as {"ok": false, "error"}.
 import json
 import os
@@ -195,18 +196,12 @@ def drop_volumes():
     return targets
 
 
-IMAGE_JSON = "/etc/kvbox/image.json"
 IDLE_TIMEOUT = 10
 
 
-def idle():
-    try:
-        with open(IMAGE_JSON) as f:
-            script = json.load(f).get("idle")
-    except FileNotFoundError:
-        script = None
-    if not isinstance(script, str) or not script:
-        raise ValueError(f"no idle check: {IMAGE_JSON} names no \"idle\" script")
+def idle(script):
+    if not isinstance(script, str) or not script.startswith("/"):
+        raise ValueError("idle needs the script's absolute path")
     r = subprocess.run([script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=IDLE_TIMEOUT)
     return r.returncode == 0
 
@@ -238,7 +233,7 @@ def handle(req):
         log(f"environment: {n} variables{', changed' if changed else ''}")
         return {"ok": True, "vars": n, "changed": changed}
     if op == "idle":
-        return {"ok": True, "idle": idle()}
+        return {"ok": True, "idle": idle(req.get("path"))}
     raise ValueError(f"unknown op {op!r}")
 
 

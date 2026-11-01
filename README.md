@@ -110,8 +110,9 @@ host reads from the image file without booting it (`debugfs -R "cat
 - `connect`: printed by the host after `kvbox new`, with `${...}` expanded
   (`${BOX}` is the box name).
 - `idle` (optional, kvbox #102): a script in the box that exits 0 when the box
-  is idle; the host's auto-hibernate asks it (kvbox-agent's `idle`, base agent
-  from v0.12.0) instead of watching network traffic. `autoHibernate` may also
+  is idle; a new box's idle check (the host keeps it, `kvbox vm set
+  --idle-check` changes it), which auto-hibernate asks through kvbox-agent's
+  `idle` (base v0.12.0 and later) instead of watching network traffic. `autoHibernate` may also
   be a duration (`"10m"`), a new box's idle time.
 
 So the box always receives `POSTGRES_USER`, `POSTGRES_DB` and
@@ -146,7 +147,7 @@ comes from base.
 ```
 
 The runner keeps a long poll open to GitHub, so network traffic never says
-the box is idle. `idle` (kvbox issue #102) names a script the host asks
+the box is idle. `idle` (kvbox issue #102) names the script a new box's host asks
 instead, through kvbox-agent's `idle` request: `kvbox-idle` exits 0 while no
 `Runner.Worker` process runs (one exists only during a job). `autoHibernate`
 gives a new box 10 minutes of that before it hibernates. `kvbox-gh-runner-init.service` runs at every boot
