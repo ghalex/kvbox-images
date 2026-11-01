@@ -42,7 +42,8 @@
 # idle check (its image's "idle" from /etc/kvbox/image.json by default, or one its owner set with
 # `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
 # and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
-# check, and hibernates it after its auto-hibernate time of idle answers in a row.
+# check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
+# own thread so a slow script never holds up another request; every op but "idle" still runs one at a time.
 # Errors come back as {"ok": false, "error"}.
 import json
 import os
@@ -51,6 +52,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 PORT = 52
@@ -237,13 +239,28 @@ def handle(req):
     raise ValueError(f"unknown op {op!r}")
 
 
+ONE_AT_A_TIME = threading.Lock()
+
+
+def serve_logged(conn):
+    try:
+        serve(conn)
+    except OSError as e:
+        log(f"connection: {e}")
+
+
 def serve(conn):
     with conn, conn.makefile("rb") as rd, conn.makefile("wb") as wr:
         line = rd.readline()
         if not line:
             return
         try:
-            reply = handle(json.loads(line))
+            req = json.loads(line)
+            if req.get("op") == "idle":
+                reply = handle(req)
+            else:
+                with ONE_AT_A_TIME:
+                    reply = handle(req)
         except subprocess.CalledProcessError as e:
             reply = {"ok": False, "error": f"{' '.join(e.cmd)}: {e.stderr.strip()}"}
         except Exception as e:  # noqa: BLE001 - report anything to the host rather than die
@@ -264,10 +281,7 @@ def main():
             log(f"accept: {e}")
             time.sleep(0.1)
             continue
-        try:
-            serve(conn)
-        except OSError as e:
-            log(f"connection: {e}")
+        threading.Thread(target=serve_logged, args=(conn,), daemon=True).start()
 
 
 if __name__ == "__main__":
