@@ -157,8 +157,11 @@ registration token from the repo's Settings → Actions → Runners → New
 self-hosted runner, single-use, valid for an hour), `GITHUB_RUNNER_NAME`
 (default: the box name) and `GITHUB_RUNNER_LABELS`, runs `config.sh
 --unattended --replace` as kvbox unless `.runner` exists, installs the runner's
-systemd service with `svc.sh` unless `.service` exists, starts it and writes
-the marker. The runner service is enabled, so it is back after every boot.
+systemd service with `svc.sh` unless `.service` exists, adds a drop-in with
+`Restart=always` (a runner killed by the OOM killer comes back by itself),
+starts it and writes the marker. The runner service is enabled, so it is back
+after every boot. `kvbox-docker-prune.timer` runs `docker system prune -af
+--filter until=24h` once a day so CI's images and build cache don't fill the disk.
 Without a URL or token it does nothing and leaves no marker. Its log is
 `journalctl -u kvbox-gh-runner-init`.
 

@@ -1,0 +1,10 @@
+# Daily cleanup of CI's Docker leftovers (kvbox #104): images, containers, networks and build cache
+# unused for a day. Without it CI filled an 8 GB disk in about two days.
+[Unit]
+Description=kvbox: remove Docker images, containers and build cache unused for 24 hours
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker system prune -af --filter until=24h

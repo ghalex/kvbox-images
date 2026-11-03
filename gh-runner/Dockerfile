@@ -24,4 +24,4 @@ RUN install -d -o kvbox -g kvbox /home/kvbox/actions-runner \
 COPY rootfs/ /
 RUN chmod 0755 /usr/local/sbin/kvbox-gh-runner-init /usr/local/sbin/kvbox-idle \
     && chmod 0644 /etc/kvbox/image.json \
-    && systemctl enable kvbox-gh-runner-init.service
+    && systemctl enable kvbox-gh-runner-init.service kvbox-docker-prune.timer

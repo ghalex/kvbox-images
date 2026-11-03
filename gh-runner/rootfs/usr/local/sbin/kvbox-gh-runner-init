@@ -90,6 +90,12 @@ fi
 if [[ ! -e .service ]]; then
   ./svc.sh install kvbox
 fi
+# svc.sh's unit has no Restart=, so a runner the OOM killer took stayed offline (kvbox #104). The unit's
+# name holds the owner and box name, so the drop-in goes in by name here rather than in the image.
+unit="$(cat .service)"
+install -d -m 0755 "/etc/systemd/system/$unit.d"
+printf '[Service]\nRestart=always\nRestartSec=5\n' > "/etc/systemd/system/$unit.d/kvbox-restart.conf"
+systemctl daemon-reload
 ./svc.sh start
 
 install -d -m 0755 "$(dirname "$MARKER")"

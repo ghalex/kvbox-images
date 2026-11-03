@@ -178,11 +178,16 @@ def set_env(pairs):
     os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
     os.chown(ssh_dir, user.pw_uid, user.pw_gid)
     write_atomic(os.path.join(ssh_dir, "environment"), "".join(f"{k}={v}\n" for k, v in pairs), 0o600, user.pw_uid, user.pw_gid)
-    if changed:
-        sh("systemctl", "try-restart", "--no-block", APP_SERVICE)
+    # The marker before the app restart: a unit waiting for it must never depend on kvbox-app (kvbox #104).
     os.makedirs(os.path.dirname(ENV_READY), mode=0o755, exist_ok=True)
     with open(ENV_READY, "a"):
         os.utime(ENV_READY)
+    if changed:
+        # A box never deployed has no kvbox-app unit: systemctl answers 5 (not found), which is fine.
+        r = subprocess.run(["systemctl", "try-restart", "--no-block", APP_SERVICE],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if r.returncode not in (0, 5):
+            raise subprocess.CalledProcessError(r.returncode, r.args, stderr=r.stderr)
     return len(pairs), changed
 
 
