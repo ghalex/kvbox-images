@@ -1,10 +1,14 @@
 # Daily cleanup of CI's Docker leftovers (kvbox #104): images, containers, networks and build cache
-# unused for a day. Without it CI filled an 8 GB disk in about two days.
+# unused for a day, then every volume no container holds. Without it CI filled an 8 GB disk in
+# about two days; without the volume step, the anonymous volumes CI's Postgres service containers
+# leave behind filled a 16 GB disk in a week (kvbox #115). `docker volume prune` takes no `until`
+# filter, so it is its own command.
 [Unit]
-Description=kvbox: remove Docker images, containers and build cache unused for 24 hours
+Description=kvbox: remove Docker images, containers, build cache unused for 24 hours and unused volumes
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker system prune -af --filter until=24h
+ExecStart=/usr/bin/docker volume prune -af
