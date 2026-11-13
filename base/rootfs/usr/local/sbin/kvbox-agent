@@ -33,8 +33,8 @@
 # "env" is the box owner's environment variables (kvbox issue #88), sent at every boot and after a
 # restore; the whole list replaces the previous one. Two files, one per reader, each in the only
 # form its reader takes literally: /etc/kvbox/env for systemd's EnvironmentFile= (double-quoted,
-# `\` and `"` escaped; the `kvbox-app` unit of `kvbox deploy` reads it and is restarted when the
-# list changed) and the kvbox user's ~/.ssh/environment for sshd (PermitUserEnvironment, plain
+# `\` and `"` escaped; the units of `kvbox deploy` read it, and every one that does is restarted
+# when the list changed, see env_units) and the kvbox user's ~/.ssh/environment for sshd (PermitUserEnvironment, plain
 # KEY=value, so `kvbox connect` and `kvbox exec` sessions get them). pam_env was ruled out: it cuts
 # a value at `#` even inside quotes. A value cannot hold a newline in either file. Every successful
 # "env" also touches /run/kvbox/env-ready (tmpfs, so absent at each boot until the first push).
@@ -45,6 +45,7 @@
 # check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
 # own thread so a slow script never holds up another request; every op but "idle" still runs one at a time.
 # Errors come back as {"ok": false, "error"}.
+import glob
 import json
 import os
 import pwd
@@ -142,7 +143,31 @@ ENV_FILE = "/etc/kvbox/env"
 # Touched after every env push. /run is a tmpfs, so its absence means "no env yet this boot": a
 # unit that needs the owner's variables (the postgres image's kvbox-postgres-init, kvbox #87) waits for it.
 ENV_READY = "/run/kvbox/env-ready"
-APP_SERVICE = "kvbox-app.service"
+UNIT_DIR = "/etc/systemd/system"
+SSH_ENV_FILE = "/home/kvbox/.ssh/environment"
+# The image's own units are never restarted for a variable: this agent among them.
+OWN_UNITS = ("kvbox-agent.service", "kvbox-init.service", "kvbox-volumes.service")
+
+
+def env_units():
+    """The `kvbox deploy` units that read the owner's variables (kvbox #167): `kvbox-app` of a single
+    app and `kvbox-<service>` of a stack. Told by what the unit file names, not by a list of names:
+    a Node unit has EnvironmentFile=/etc/kvbox/env, a container's has --env-file ~/.ssh/environment.
+    A stack's database reads neither (its password is its own file), so a changed variable never
+    restarts it."""
+    units = []
+    for path in sorted(glob.glob(os.path.join(UNIT_DIR, "kvbox-*.service"))):
+        name = os.path.basename(path)
+        if name in OWN_UNITS:
+            continue
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        if ENV_FILE in text or SSH_ENV_FILE in text:
+            units.append(name)
+    return units
 
 
 def write_atomic(path, text, mode, uid=0, gid=0):
@@ -182,9 +207,10 @@ def set_env(pairs):
     os.makedirs(os.path.dirname(ENV_READY), mode=0o755, exist_ok=True)
     with open(ENV_READY, "a"):
         os.utime(ENV_READY)
-    if changed:
-        # A box never deployed has no kvbox-app unit: systemctl answers 5 (not found), which is fine.
-        r = subprocess.run(["systemctl", "try-restart", "--no-block", APP_SERVICE],
+    units = env_units() if changed else []
+    if units:
+        # try-restart: only a unit that is running; one the owner stopped stays stopped.
+        r = subprocess.run(["systemctl", "try-restart", "--no-block", *units],
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if r.returncode not in (0, 5):
             raise subprocess.CalledProcessError(r.returncode, r.args, stderr=r.stderr)

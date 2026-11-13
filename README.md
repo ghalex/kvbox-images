@@ -56,7 +56,10 @@ replaces the box owner's environment variables (kvbox issue #88), sent by the
 host at every boot and after a restore. The agent writes them twice, each in the
 form its reader takes literally: `/etc/kvbox/env` for systemd's
 `EnvironmentFile=` (double-quoted, `\` and `"` escaped; `kvbox deploy`'s
-`kvbox-app` unit reads it and is restarted when the list changed) and the
+units read it: `kvbox-app` of one app, `kvbox-<service>` of a stack; when the
+list changed, every `kvbox-*` unit in `/etc/systemd/system` whose file names
+one of the two variable files is restarted if it runs, base v0.13.0 and later,
+only `kvbox-app` before; a stack's database reads neither and is left alone) and the
 `kvbox` user's `~/.ssh/environment` for sshd (`PermitUserEnvironment yes`), so
 every SSH session, `kvbox exec` included, has them. It answers with the count
 and whether anything changed. Values are single lines. After every successful
