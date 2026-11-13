@@ -18,6 +18,8 @@
 #                                       -> {"ok": true, "vars": 2, "changed": true}
 #   {"op": "idle", "path": "/usr/local/sbin/kvbox-idle"}
 #                                       -> {"ok": true, "idle": true}
+#   {"op": "script", "path": "/usr/local/sbin/kvbox-postgres-status", "input": {"any": "json"}}
+#                                       -> {"ok": true, "output": {"any": "json"}}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -43,7 +45,13 @@
 # `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
 # and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
 # check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
-# own thread so a slow script never holds up another request; every op but "idle" still runs one at a time.
+# own thread so a slow script never holds up another request; every op but "idle" and "script" still runs one at a time.
+# "script" is how the host asks an image something only the image knows (kvbox issue #173: a managed
+# Postgres's status, a password reset). The image names its scripts in /etc/kvbox/image.json
+# ("scripts"), the host sends the path; it is run as root with "input" (any JSON, null when absent) as
+# one JSON line on stdin, at most SCRIPT_TIMEOUT seconds, and must print one JSON value, which comes
+# back as "output". A non-zero exit is an error carrying the last line the script wrote to stderr.
+# Input goes over stdin, never argv: it may hold a password.
 # Errors come back as {"ok": false, "error"}.
 import glob
 import json
@@ -239,6 +247,34 @@ def idle(script):
     return r.returncode == 0
 
 
+SCRIPT_TIMEOUT = 30
+SCRIPT_MAX_OUTPUT = 1 << 20
+
+
+def script(path, data):
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("script needs the script's absolute path")
+    if not os.path.isfile(path):
+        raise ValueError(f"script {path} is not in this image")
+    try:
+        r = subprocess.run([path], input=json.dumps(data) + "\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, timeout=SCRIPT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"script {path} did not finish within {SCRIPT_TIMEOUT}s") from None
+    if r.returncode != 0:
+        lines = r.stderr.strip().splitlines()
+        raise ValueError(lines[-1] if lines else f"script {path} failed (exit {r.returncode})")
+    if len(r.stdout) > SCRIPT_MAX_OUTPUT:
+        raise ValueError(f"script {path} printed more than {SCRIPT_MAX_OUTPUT} bytes")
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        raise ValueError(f"script {path} did not print JSON") from None
+
+
+UNLOCKED_OPS = ("idle", "script")  # they run something that may be slow
+
+
 def handle(req):
     op = req.get("op")
     if op == "ping":
@@ -267,6 +303,8 @@ def handle(req):
         return {"ok": True, "vars": n, "changed": changed}
     if op == "idle":
         return {"ok": True, "idle": idle(req.get("path"))}
+    if op == "script":
+        return {"ok": True, "output": script(req.get("path"), req.get("input"))}
     raise ValueError(f"unknown op {op!r}")
 
 
@@ -287,7 +325,7 @@ def serve(conn):
             return
         try:
             req = json.loads(line)
-            if req.get("op") == "idle":
+            if req.get("op") in UNLOCKED_OPS:
                 reply = handle(req)
             else:
                 with ONE_AT_A_TIME:

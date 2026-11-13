@@ -8,7 +8,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | Image | Release tag | Contents |
 |---|---|---|
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
-| `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus Ubuntu's PostgreSQL (16 on 24.04) listening on every address, password (scram-sha-256) logins from anywhere; the role, database and password come from the box's environment (see [The postgres image](#the-postgres-image)) |
+| `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
@@ -66,6 +66,13 @@ and whether anything changed. Values are single lines. After every successful
 `env` the agent also touches `/run/kvbox/env-ready` (base v0.12.0 and later;
 `/run` is a tmpfs, so the file is absent at each boot until the host's first
 push): a unit that needs the owner's variables waits for it.
+`{"op": "script", "path": "/usr/local/sbin/…", "input": <any JSON>}` (base
+v0.14.0 and later, kvbox issue #173) runs a script the image names in its
+`image.json` (`scripts`) as root, with `input` as one JSON line on stdin (never
+argv: it may hold a password), for at most 30 seconds, and answers
+`{"ok": true, "output": <the JSON the script printed>}`; a non-zero exit is an
+error carrying the script's last stderr line. It is how the host asks an image
+something only the image knows, such as a managed Postgres's status.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot
@@ -86,8 +93,9 @@ writable root.
 
 ## The postgres image
 
-`postgres/` (kvbox issue #87) is `FROM kvbox-base:local` plus Ubuntu's
-`postgresql` package. The cluster is created at build time with
+`postgres/` (kvbox issues #87, #173) is `FROM kvbox-base:local` plus
+`postgresql-18` from the PostgreSQL project's apt repository (PGDG), so minor
+releases arrive with each image release. A cluster is created at build time with
 `listen_addresses = '*'` and `pg_hba.conf` allowing `host all all 0.0.0.0/0`
 and `::/0` with scram-sha-256: the host firewall decides who reaches a box
 (boxes are isolated unless linked). `postgresql.service` starts at boot.
@@ -101,7 +109,11 @@ host reads from the image file without booting it (`debugfs -R "cat
   "autoHibernate": false,
   "env": { "POSTGRES_USER": "postgres", "POSTGRES_DB": "${POSTGRES_USER}" },
   "generate": ["POSTGRES_PASSWORD"],
-  "connect": "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${BOX}.kvbox:5432/${POSTGRES_DB}"
+  "connect": "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${BOX}.kvbox:5432/${POSTGRES_DB}",
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-postgres-status",
+    "password": "/usr/local/sbin/kvbox-postgres-password"
+  }
 }
 ```
 
@@ -117,6 +129,9 @@ host reads from the image file without booting it (`debugfs -R "cat
   --idle-check` changes it), which auto-hibernate asks through kvbox-agent's
   `idle` (base v0.12.0 and later) instead of watching network traffic. `autoHibernate` may also
   be a duration (`"10m"`), a new box's idle time.
+- `scripts` (optional, kvbox #173): named scripts in the box the host may run
+  through kvbox-agent's `script` (base v0.14.0 and later); the host knows only
+  the names, each image decides what they do.
 
 So the box always receives `POSTGRES_USER`, `POSTGRES_DB` and
 `POSTGRES_PASSWORD` through kvbox-agent's `env`. `kvbox-postgres-init.service`
@@ -127,6 +142,33 @@ unless it exists, sets its password, creates the database owned by it unless
 it exists, then writes the marker. Without a password it does nothing and
 leaves no marker, so a later boot retries. Its log is
 `journalctl -u kvbox-postgres-init`.
+
+Before that, with the server stopped, the same script (kvbox #173):
+
+- makes the box's own self-signed TLS certificate (ten years,
+  `/etc/postgresql/18/main/kvbox-server.{crt,key}`) and turns `ssl` on with it:
+  the certificate the package made at build time would be the same key in every
+  box. A client asks for it with `sslmode=require`.
+- with `POSTGRES_DATA=/mnt/<volume>/<directory>`, keeps the data on that volume:
+  an empty cluster is created there (`initdb`, built beside its final place and
+  renamed) unless one exists, and `data_directory` points at it; an existing
+  cluster of the same major version is used as it is. The volume must be
+  mounted: when it is not, nothing is done and the next boot retries, so a
+  volume attached after the box was made (the attach restarts the box) is
+  picked up then. `postgresql@.service` starts after `kvbox-volumes.service`.
+
+The role is never a superuser unless it is `postgres` itself; with another
+`POSTGRES_USER`, `postgres` has no password and only the local socket.
+
+The two scripts `image.json` names:
+
+- `status` prints `{"ready", "accepting", "version", "connections",
+  "dataBytes", "storage": {"usedBytes", "totalBytes"}}`: whether the init has
+  finished, whether the server answers, its version, the client sessions open,
+  the size of all databases and the filesystem holding the data (the volume
+  with `POSTGRES_DATA`).
+- `password` reads `{"user", "password"}` and sets that role's password as the
+  local superuser (`postgres` itself is refused), printing `{"user"}`.
 
 ```
 kvbox new mydb --base postgres -e POSTGRES_PASSWORD=x -e POSTGRES_USER=me -e POSTGRES_DB=app

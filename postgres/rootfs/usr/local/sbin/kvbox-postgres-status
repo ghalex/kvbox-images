@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# kvbox-postgres-status (kvbox #173): what a managed Postgres shows about itself. Named as "status" in
+# /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
+#
+#   {"ready": true, "accepting": true, "version": "18.1", "connections": 3, "dataBytes": 31457280,
+#    "storage": {"usedBytes": 2254857830, "totalBytes": 10737418240}}
+#
+# ready       kvbox-postgres-init has finished: the role, its password and the database exist
+# accepting   the server answers on its local socket
+# version     the server's own version; only the major ("18") while it is not accepting
+# connections client sessions open right now, this script's own not counted
+# dataBytes   the size of every database together (absent while not accepting)
+# storage     the filesystem holding the data directory: the volume when POSTGRES_DATA is set
+import json
+import os
+import subprocess
+
+MARKER = "/var/lib/kvbox/postgres-init.done"
+
+QUERY = """
+SELECT json_build_object(
+  'version', split_part(current_setting('server_version'), ' ', 1),
+  'connections', (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()),
+  'dataBytes', (SELECT coalesce(sum(pg_database_size(oid)), 0)::bigint FROM pg_database),
+  'dataDirectory', current_setting('data_directory'))
+"""
+
+
+def major():
+    return sorted(os.listdir("/usr/lib/postgresql"), key=int)[-1]
+
+
+def ask_server():
+    r = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-XAtq", "-d", "postgres", "-c", QUERY],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+    return json.loads(r.stdout) if r.returncode == 0 else None
+
+
+def configured_data_directory():
+    r = subprocess.run(["pg_conftool", "-s", major(), "main", "show", "data_directory"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def storage(path):
+    try:
+        fs = os.statvfs(path)
+    except OSError:
+        return None
+    return {"usedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize, "totalBytes": fs.f_blocks * fs.f_frsize}
+
+
+def main():
+    out = {"ready": os.path.exists(MARKER)}
+    try:
+        answer = ask_server()
+    except (subprocess.TimeoutExpired, ValueError):
+        answer = None
+    if answer:
+        data = answer.pop("dataDirectory")
+        out.update(accepting=True, **answer)
+    else:
+        data = configured_data_directory()
+        out.update(accepting=False, version=major(), connections=0)
+    space = storage(data) if data else None
+    if space:
+        out["storage"] = space
+    print(json.dumps(out))
+
+
+main()

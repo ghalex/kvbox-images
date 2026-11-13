@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# kvbox-postgres-init (kvbox #87): give Postgres the role, database and password the box owner asked
-# for, once per box. Run by kvbox-postgres-init.service, which is skipped once the marker exists.
+# kvbox-postgres-init (kvbox #87, #173): give Postgres the role, database and password the box owner
+# asked for, once per box. Run by kvbox-postgres-init.service, which is skipped once the marker exists.
 #
 # The host sends POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD (defaults and a generated password
 # filled in from /etc/kvbox/image.json) through kvbox-agent's "env" a few seconds after boot; the
-# agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. So: wait for that, read the three,
-# create the role (LOGIN, CREATEDB) unless it exists, set its password, create the database owned by
-# it unless it exists, then write the marker. Every step is idempotent, so an interrupted run is
-# simply redone at the next boot. Without a password nothing is done and no marker is written: a
-# later boot that has one retries.
+# agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. So: wait for that, read them, then
+# with the server stopped:
+#   - make this box's own TLS certificate (self-signed, ten years) unless it has one; the one the
+#     package made at build time would be the same key in every box;
+#   - with POSTGRES_DATA (a directory on a volume, /mnt/<volume>/…, kvbox #173): create an empty
+#     cluster there unless one exists, and point the server at it. The volume must be mounted;
+#     when it is not (it is attached after the box was made) nothing is done and the next boot retries.
+# Then start the server, create the role (LOGIN, CREATEDB, never superuser) unless it exists, set its
+# password, create the database owned by it unless it exists, and write the marker. Every step is
+# idempotent, so an interrupted run is simply redone at the next boot. Without a password nothing is
+# done and no marker is written: a later boot that has one retries.
 set -euo pipefail
 
 ENV_FILE=/etc/kvbox/env
@@ -46,7 +52,7 @@ unquote() {
   printf '%s' "$out"
 }
 
-PG_USER="" PG_PASSWORD="" PG_DB=""
+PG_USER="" PG_PASSWORD="" PG_DB="" PG_DATA=""
 if [[ -r "$ENV_FILE" ]]; then
   re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -55,6 +61,7 @@ if [[ -r "$ENV_FILE" ]]; then
       POSTGRES_USER)     PG_USER="$(unquote "${BASH_REMATCH[2]}")" ;;
       POSTGRES_PASSWORD) PG_PASSWORD="$(unquote "${BASH_REMATCH[2]}")" ;;
       POSTGRES_DB)       PG_DB="$(unquote "${BASH_REMATCH[2]}")" ;;
+      POSTGRES_DATA)     PG_DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
     esac
   done < "$ENV_FILE"
 fi
@@ -66,11 +73,65 @@ if [[ -z "$PG_PASSWORD" ]]; then
   exit 1
 fi
 
+PG_VER="$(ls /usr/lib/postgresql | sort -n | tail -1)"
+CONF="/etc/postgresql/$PG_VER/main"
+as_postgres() { runuser -u postgres -- "$@"; }
+
+if [[ -n "$PG_DATA" ]]; then
+  # /mnt/<volume>/<path>: only a mounted volume, never the box's own disk under an unmounted /mnt/<volume>.
+  re_data='^/mnt/([A-Za-z0-9][A-Za-z0-9._-]*)(/[A-Za-z0-9][A-Za-z0-9._-]*)+$'
+  if [[ ! "$PG_DATA" =~ $re_data ]]; then
+    log "POSTGRES_DATA=\"$PG_DATA\" is not a directory on a volume (/mnt/<volume>/<directory>); nothing done"
+    exit 1
+  fi
+  volume="/mnt/${BASH_REMATCH[1]}"
+  if ! mountpoint -q "$volume"; then
+    log "POSTGRES_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+    exit 1
+  fi
+  if [[ -e "$PG_DATA/PG_VERSION" && "$(cat "$PG_DATA/PG_VERSION")" != "$PG_VER" ]]; then
+    log "$PG_DATA holds a PostgreSQL $(cat "$PG_DATA/PG_VERSION") cluster and this image runs $PG_VER; nothing done"
+    exit 1
+  fi
+fi
+
+# pg_ctlcluster goes through systemd when it runs the box; exit 2 = already stopped.
+pg_ctlcluster "$PG_VER" main stop 2>/dev/null || [[ $? -eq 2 ]]
+
+if [[ ! -s "$CONF/kvbox-server.key" || ! -s "$CONF/kvbox-server.crt" ]]; then
+  openssl req -new -x509 -days 3650 -nodes -newkey rsa:2048 -subj "/CN=$(hostname)" \
+    -keyout "$CONF/kvbox-server.key.tmp" -out "$CONF/kvbox-server.crt" 2>/dev/null
+  chown postgres:postgres "$CONF/kvbox-server.key.tmp" "$CONF/kvbox-server.crt"
+  chmod 0600 "$CONF/kvbox-server.key.tmp"
+  mv "$CONF/kvbox-server.key.tmp" "$CONF/kvbox-server.key"
+  log "TLS certificate made for this box"
+fi
+printf "# kvbox-postgres-init: this box's own certificate\nssl = on\nssl_cert_file = '%s'\nssl_key_file = '%s'\n" \
+  "$CONF/kvbox-server.crt" "$CONF/kvbox-server.key" > "$CONF/conf.d/kvbox.conf"
+
+if [[ -n "$PG_DATA" ]]; then
+  if [[ ! -e "$PG_DATA/PG_VERSION" ]]; then
+    # Built beside its final place and renamed, so a power cut never leaves half a cluster there.
+    rm -rf "$PG_DATA.new"
+    install -d -m 0700 -o postgres -g postgres "$PG_DATA.new"
+    as_postgres "/usr/lib/postgresql/$PG_VER/bin/initdb" -D "$PG_DATA.new" --encoding=UTF8 --locale=C.UTF-8 \
+      --auth-local=peer --auth-host=scram-sha-256 >/dev/null
+    [[ -d "$PG_DATA" ]] && rmdir "$PG_DATA"
+    mv "$PG_DATA.new" "$PG_DATA"
+    log "empty cluster created in $PG_DATA"
+  fi
+  # The line itself, not conf.d: pg_ctlcluster reads it too.
+  KVBOX_DATA="$PG_DATA" perl -pi -e 's/^data_directory\s*=.*/data_directory = \x27$ENV{KVBOX_DATA}\x27/' "$CONF/postgresql.conf"
+  grep -qxF "data_directory = '$PG_DATA'" "$CONF/postgresql.conf" || { log "could not point the server at $PG_DATA"; exit 1; }
+fi
+
+pg_ctlcluster "$PG_VER" main start
+
 for ((i = 0; i < WAIT_PG; i++)); do
-  runuser -u postgres -- pg_isready -q && break
+  as_postgres pg_isready -q && break
   sleep 1
 done
-runuser -u postgres -- pg_isready -q || { log "gave up: postgres not accepting connections after ${WAIT_PG}s"; exit 1; }
+as_postgres pg_isready -q || { log "gave up: postgres not accepting connections after ${WAIT_PG}s"; exit 1; }
 
 # The values reach psql through the environment (\getenv), never argv or this heredoc, and are
 # quoted by psql itself (:'v' literal, :"v" identifier; format %I/%L for the \gexec statements).

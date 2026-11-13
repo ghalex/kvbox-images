@@ -2,5 +2,9 @@
   "autoHibernate": false,
   "env": { "POSTGRES_USER": "postgres", "POSTGRES_DB": "${POSTGRES_USER}" },
   "generate": ["POSTGRES_PASSWORD"],
-  "connect": "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${BOX}.kvbox:5432/${POSTGRES_DB}"
+  "connect": "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${BOX}.kvbox:5432/${POSTGRES_DB}",
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-postgres-status",
+    "password": "/usr/local/sbin/kvbox-postgres-password"
+  }
 }
