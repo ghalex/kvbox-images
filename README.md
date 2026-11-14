@@ -201,8 +201,8 @@ buckets and keys the control plane makes through the scripts below.
 Nothing listens until the box knows where its data goes: `garage.service` is
 skipped while `/etc/garage.toml` is missing. `kvbox-garage-init.service` runs
 at every boot until `/var/lib/kvbox/garage-init.done` exists: it waits for
-`/run/kvbox/env-ready`, reads `GARAGE_DATA` from `/etc/kvbox/env` (parsed,
-never sourced), then
+`/run/kvbox/env-ready`, reads `GARAGE_DATA` and `GARAGE_REGION` from
+`/etc/kvbox/env` (parsed, never sourced), then
 
 - requires `GARAGE_DATA=/mnt/<volume>[/<directory>]` on a mounted volume (a
   bare `/mnt/<volume>` becomes `/mnt/<volume>/garage`); when the volume is not
@@ -211,7 +211,9 @@ never sourced), then
   whose volume is detached has no `rpc_secret`, so the server refuses to start
   instead of starting empty on the box's own disk;
 - writes `/etc/garage.toml` (LMDB, both fsyncs on, `replication_factor = 1`,
-  RPC on localhost only, S3 on `[::]:3900`, region `us-east-1`), starts the
+  RPC on localhost only, S3 on `[::]:3900`, region `GARAGE_REGION`: a name
+  such as `ro-west-1`, `us-east-1` when not sent, fixed from then on since every
+  request is signed with it), starts the
   server and makes this node the whole cluster (zone `kvbox`, the volume's
   size as capacity) unless the volume already has a layout.
 

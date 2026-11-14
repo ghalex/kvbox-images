@@ -2,7 +2,8 @@
 # kvbox-garage-init (kvbox #182): set Garage up on the box's volume, once per box. Run by
 # kvbox-garage-init.service, which is skipped once the marker exists.
 #
-# The host sends GARAGE_DATA (a directory on a volume, /mnt/<volume>[/…]) through kvbox-agent's "env"
+# The host sends GARAGE_DATA (a directory on a volume, /mnt/<volume>[/…]) and GARAGE_REGION (the S3
+# region the storage answers to, `ro-west-1`; `us-east-1` when not sent) through kvbox-agent's "env"
 # a few seconds after boot; the agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. Garage
 # does not run before this script has written /etc/garage.toml (garage.service is skipped without it).
 # So: wait for the variables, read them, then
@@ -55,12 +56,14 @@ unquote() {
 }
 
 DATA=""
+REGION=""
 if [[ -r "$ENV_FILE" ]]; then
   re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ $re ]] || continue
     case "${BASH_REMATCH[1]}" in
       GARAGE_DATA) DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+      GARAGE_REGION) REGION="$(unquote "${BASH_REMATCH[2]}")" ;;
     esac
   done < "$ENV_FILE"
 fi
@@ -78,6 +81,12 @@ fi
 volume="/mnt/${BASH_REMATCH[1]}"
 if ! mountpoint -q "$volume"; then
   log "GARAGE_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+  exit 1
+fi
+# The region is part of every request's signature: written once, with the rest of the configuration.
+REGION="${REGION:-us-east-1}"
+if [[ ! "$REGION" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]]; then
+  log "GARAGE_REGION=\"$REGION\" is not a region name (lowercase letters, digits and '-', like ro-west-1); nothing done"
   exit 1
 fi
 # The files sit one level down, so the server never starts on the empty mount point of a detached volume.
@@ -109,7 +118,7 @@ rpc_public_addr = "127.0.0.1:3901"
 rpc_secret_file = "$DATA/rpc_secret"
 
 [s3_api]
-s3_region = "us-east-1"
+s3_region = "$REGION"
 api_bind_addr = "[::]:3900"
 TOML
 chmod 0644 "$tmp"
