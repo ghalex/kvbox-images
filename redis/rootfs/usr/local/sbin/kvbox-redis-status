@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+# kvbox-redis-status (kvbox #176): what a managed Redis shows about itself. Named as "status" in
+# /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
+#
+#   {"ready": true, "accepting": true, "version": "9.1.3", "clients": 3,
+#    "memory": {"usedBytes": 1048576, "maxBytes": 1572864000},
+#    "storage": {"usedBytes": 2254857, "totalBytes": 2147483648}}
+#
+# ready       kvbox-redis-init has finished: the server has its password, its data directory, its certificate
+# accepting   the server answers on its local socket and has finished loading its data
+# version     Valkey's own version (from the binary while it is not accepting)
+# clients     client connections open right now, this script's own not counted
+# memory      what the data takes and the most it may take (maxmemory); absent while not accepting
+# storage     the filesystem holding the data directory: the volume when REDIS_DATA is set
+import json
+import os
+import re
+import subprocess
+
+MARKER = "/var/lib/kvbox/redis-init.done"
+CONF = "/etc/valkey/kvbox.conf"
+AUTH = "/etc/valkey/kvbox-auth.conf"
+SOCKET = "/run/valkey/valkey.sock"
+
+
+def password():
+    """The password kvbox-auth.conf holds: requirepass "…" with \\\\ and \\" escaped."""
+    try:
+        with open(AUTH, encoding="utf-8") as f:
+            m = re.search(r'^requirepass "(.*)"$', f.read(), re.M)
+    except OSError:
+        return None
+    return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
+
+
+def info():
+    """INFO as a dict, or None when the server does not answer."""
+    pw = password()
+    if pw is None:
+        return None
+    r = subprocess.run(["valkey-cli", "-s", SOCKET, "info"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                       text=True, timeout=10, env=dict(os.environ, VALKEYCLI_AUTH=pw))
+    if r.returncode != 0:
+        return None
+    fields = dict(line.split(":", 1) for line in r.stdout.splitlines() if ":" in line and not line.startswith("#"))
+    return fields if "valkey_version" in fields or "redis_version" in fields else None
+
+
+def binary_version():
+    r = subprocess.run(["valkey-server", "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+    m = re.search(r"\bv=(\S+)", r.stdout)
+    return m.group(1) if m else ""
+
+
+def data_directory():
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            m = re.search(r'^dir "(.*)"$', f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def storage(path):
+    try:
+        fs = os.statvfs(path)
+    except OSError:
+        return None
+    return {"usedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize, "totalBytes": fs.f_blocks * fs.f_frsize}
+
+
+def main():
+    out = {"ready": os.path.exists(MARKER)}
+    try:
+        fields = info()
+    except (subprocess.TimeoutExpired, OSError):
+        fields = None
+    if fields:
+        out.update(
+            accepting=fields.get("loading", "0") == "0",
+            version=fields.get("valkey_version") or fields.get("redis_version", ""),
+            clients=max(0, int(fields.get("connected_clients", "1")) - 1),
+            memory={"usedBytes": int(fields.get("used_memory", "0")), "maxBytes": int(fields.get("maxmemory", "0"))},
+        )
+    else:
+        out.update(accepting=False, version=binary_version(), clients=0)
+    data = data_directory()
+    space = storage(data) if data else None
+    if space:
+        out["storage"] = space
+    print(json.dumps(out))
+
+
+main()

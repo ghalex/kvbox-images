@@ -1,0 +1,9 @@
+{
+  "autoHibernate": false,
+  "generate": ["REDIS_PASSWORD"],
+  "connect": "redis://default:${REDIS_PASSWORD}@${BOX}.kvbox:6379",
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-redis-status",
+    "password": "/usr/local/sbin/kvbox-redis-password"
+  }
+}

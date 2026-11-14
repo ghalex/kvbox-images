@@ -1,0 +1,24 @@
+# Valkey, once kvbox-redis-init has written this box's password (kvbox #176): before that the unit is
+# skipped at boot and the init starts it. The data may live on a volume (REDIS_DATA), so never before
+# the volumes are mounted.
+[Unit]
+Description=Valkey (kvbox redis)
+ConditionPathExists=/etc/valkey/kvbox-auth.conf
+After=network.target kvbox-volumes.service
+
+[Service]
+Type=notify
+User=valkey
+Group=valkey
+RuntimeDirectory=valkey
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/sbin/kvbox-redis-run
+Restart=always
+RestartSec=2
+TimeoutStartSec=600
+TimeoutStopSec=120
+LimitNOFILE=65536
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

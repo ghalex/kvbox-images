@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# kvbox-redis-init (kvbox #176): give Valkey the password the box owner asked for, once per box. Run by
+# kvbox-redis-init.service, which is skipped once the marker exists.
+#
+# The host sends REDIS_PASSWORD (generated when the owner gave none, see /etc/kvbox/image.json) and
+# optionally REDIS_DATA through kvbox-agent's "env" a few seconds after boot; the agent writes
+# /etc/kvbox/env and touches /run/kvbox/env-ready. Valkey does not run before this script has finished
+# its work (valkey.service is skipped while /etc/valkey/kvbox-auth.conf is missing), so it never
+# listens without a password. So: wait for the variables, read them, then
+#   - make this box's own TLS certificate (self-signed, ten years) unless it has one;
+#   - the data directory: REDIS_DATA (a directory on a volume, /mnt/<volume>/…) or /var/lib/valkey on
+#     the box's own disk. The volume must be mounted; when it is not (it is attached after the box was
+#     made) nothing is done and the next boot retries;
+#   - write /etc/valkey/kvbox.conf (dir, TLS on 6380) and /etc/valkey/kvbox-auth.conf (requirepass);
+#   - start valkey.service, wait until it answers with that password, and write the marker.
+# Every step is idempotent, so an interrupted run is simply redone at the next boot. Without a password
+# nothing is done and no marker is written: a later boot that has one retries.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/redis-init.done
+CONF_DIR=/etc/valkey
+DEFAULT_DATA=/var/lib/valkey
+WAIT_ENV=300      # seconds for the host's env push
+WAIT_SERVER=120   # seconds for the server to answer
+
+log() { echo "kvbox-redis-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); Valkey not started, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+PASSWORD="" DATA=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      REDIS_PASSWORD) PASSWORD="$(unquote "${BASH_REMATCH[2]}")" ;;
+      REDIS_DATA)     DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+if [[ -z "$PASSWORD" ]]; then
+  log "REDIS_PASSWORD is empty or missing in $ENV_FILE: Valkey is not started without a password; retrying at next boot"
+  exit 1
+fi
+
+if [[ -n "$DATA" ]]; then
+  # /mnt/<volume>[/<path>]: only a mounted volume, never the box's own disk under an unmounted /mnt/<volume>.
+  re_data='^/mnt/([A-Za-z0-9][A-Za-z0-9._-]*)(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+  if [[ ! "$DATA" =~ $re_data ]]; then
+    log "REDIS_DATA=\"$DATA\" is not a directory on a volume (/mnt/<volume>/<directory>); nothing done"
+    exit 1
+  fi
+  volume="/mnt/${BASH_REMATCH[1]}"
+  if ! mountpoint -q "$volume"; then
+    log "REDIS_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+    exit 1
+  fi
+  # On a volume the files sit one level down, so the server never starts on the empty mount point of a detached volume.
+  [[ "$DATA" == "$volume" ]] && DATA="$volume/data"
+else
+  DATA="$DEFAULT_DATA"
+fi
+
+if [[ ! -s "$CONF_DIR/kvbox-server.key" || ! -s "$CONF_DIR/kvbox-server.crt" ]]; then
+  (umask 077 && openssl req -new -x509 -days 3650 -nodes -newkey rsa:2048 -subj "/CN=$(hostname)" \
+    -keyout "$CONF_DIR/kvbox-server.key.tmp" -out "$CONF_DIR/kvbox-server.crt" 2>/dev/null)
+  chown valkey:valkey "$CONF_DIR/kvbox-server.key.tmp" "$CONF_DIR/kvbox-server.crt"
+  chmod 0600 "$CONF_DIR/kvbox-server.key.tmp"
+  mv "$CONF_DIR/kvbox-server.key.tmp" "$CONF_DIR/kvbox-server.key"
+  log "TLS certificate made for this box"
+fi
+
+install -d -m 0700 -o valkey -g valkey "$DATA"
+
+# A file is written beside its place and renamed, so the server never reads half of one.
+write_conf() { # <file>, content on stdin
+  local tmp="$1.tmp"
+  (umask 077 && cat > "$tmp")
+  chown valkey:valkey "$tmp"
+  mv "$tmp" "$1"
+}
+
+# $DATA has only [A-Za-z0-9._/-] (checked above), so it needs no escaping. No client certificate is
+# asked for: the password is the login, TLS is for the wire.
+write_conf "$CONF_DIR/kvbox.conf" <<EOF
+# kvbox-redis-init: this box's data directory and its own certificate
+dir "$DATA"
+tls-port 6380
+tls-cert-file "$CONF_DIR/kvbox-server.crt"
+tls-key-file "$CONF_DIR/kvbox-server.key"
+tls-auth-clients no
+EOF
+
+# Valkey reads a double-quoted value with \\ and \" unescaped; a password is one line with no control characters.
+escaped="${PASSWORD//\\/\\\\}"
+escaped="${escaped//\"/\\\"}"
+write_conf "$CONF_DIR/kvbox-auth.conf" <<EOF
+requirepass "$escaped"
+EOF
+
+systemctl restart valkey.service
+
+for ((i = 0; i < WAIT_SERVER; i++)); do
+  [[ "$(VALKEYCLI_AUTH="$PASSWORD" valkey-cli -s /run/valkey/valkey.sock ping 2>/dev/null)" == "PONG" ]] && break
+  sleep 1
+done
+if [[ "$(VALKEYCLI_AUTH="$PASSWORD" valkey-cli -s /run/valkey/valkey.sock ping 2>/dev/null)" != "PONG" ]]; then
+  log "gave up: Valkey not answering after ${WAIT_SERVER}s (journalctl -u valkey); retrying at next boot"
+  exit 1
+fi
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+log "done: Valkey answers with its password, data in $DATA"

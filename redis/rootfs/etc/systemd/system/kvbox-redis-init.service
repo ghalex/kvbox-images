@@ -1,0 +1,13 @@
+# Once per box: the password, the data directory and the TLS certificate from the box owner's REDIS_*
+# variables (kvbox #176). Not a oneshot, so waiting for the host's env push never holds up the boot.
+[Unit]
+Description=kvbox: Valkey's password, data directory and certificate from the box owner's environment (once)
+ConditionPathExists=!/var/lib/kvbox/redis-init.done
+After=kvbox-agent.service kvbox-volumes.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/kvbox-redis-init
+
+[Install]
+WantedBy=multi-user.target

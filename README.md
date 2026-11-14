@@ -9,6 +9,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 |---|---|---|
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
+| `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
@@ -174,6 +175,82 @@ The two scripts `image.json` names:
 kvbox new mydb --base postgres -e POSTGRES_PASSWORD=x -e POSTGRES_USER=me -e POSTGRES_DB=app
 ```
 
+## The redis image
+
+`redis/` (kvbox issue #176) is `FROM kvbox-base:local` plus Valkey, the BSD
+continuation of Redis: `valkey-server`, `valkey-cli` (also as `redis-cli`) and
+`valkey-check-aof` from the Valkey project's binary release for this Ubuntu
+(`download.valkey.io/releases/valkey-<version>-noble-<arch>.tar.gz`), the
+version and both checksums pinned in the Dockerfile (`VALKEY_VERSION`, Ubuntu
+24.04's own package is the old 7.2 line). The server runs as the user `valkey`
+from `valkey.service`.
+
+```json
+{
+  "autoHibernate": false,
+  "generate": ["REDIS_PASSWORD"],
+  "connect": "redis://default:${REDIS_PASSWORD}@${BOX}.kvbox:6379",
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-redis-status",
+    "password": "/usr/local/sbin/kvbox-redis-password"
+  }
+}
+```
+
+Nothing listens until the box has its password: `valkey.service` is skipped
+while `/etc/valkey/kvbox-auth.conf` is missing. `kvbox-redis-init.service` runs
+at every boot until `/var/lib/kvbox/redis-init.done` exists: it waits for
+`/run/kvbox/env-ready` (up to 5 minutes), reads `REDIS_PASSWORD` and
+`REDIS_DATA` from `/etc/kvbox/env` (parsed, never sourced), then
+
+- makes the box's own self-signed TLS certificate (ten years,
+  `/etc/valkey/kvbox-server.{crt,key}`);
+- with `REDIS_DATA=/mnt/<volume>/<directory>`, keeps the data on that volume
+  (without it, in `/var/lib/valkey` on the box's disk). The volume must be
+  mounted: when it is not, nothing is done and the next boot retries, so a
+  volume attached after the box was made (the attach restarts the box) is
+  picked up then. `valkey.service` starts after `kvbox-volumes.service`;
+- writes `/etc/valkey/kvbox.conf` (`dir`, `tls-port 6380`, the certificate)
+  and `/etc/valkey/kvbox-auth.conf` (`requirepass`), both included by
+  `/etc/valkey/valkey.conf`, starts the server, waits until it answers with
+  the password and writes the marker.
+
+Without a password it does nothing and leaves no marker. Its log is
+`journalctl -u kvbox-redis-init`; the server's is `journalctl -u valkey`.
+
+What `valkey.conf` settles for every box:
+
+- **Two ports**: plain on 6379 and TLS on 6380, every address; the host
+  firewall decides who reaches a box. The only login is the `default` user
+  with the password; a TLS client is not asked for a certificate.
+- **Persistence**: the append-only file, `appendfsync everysec`, in
+  `appendonlydir` under the data directory; no RDB snapshots on a timer.
+- **Memory**: `kvbox-redis-run` (the unit's `ExecStart`) gives the server
+  `maxmemory` = 75% of the box's `MemTotal`, read at every start; the rest is
+  the OS and the pages a fork copies during an AOF rewrite. The policy is
+  `noeviction`: a full server refuses writes, it never drops keys.
+- `vm.overcommit_memory = 1` (`/etc/sysctl.d/60-kvbox-redis.conf`) and
+  transparent huge pages off (`/etc/tmpfiles.d/kvbox-redis.conf`), as Valkey
+  asks.
+
+The two scripts `image.json` names:
+
+- `status` prints `{"ready", "accepting", "version", "clients", "memory":
+  {"usedBytes", "maxBytes"}, "storage": {"usedBytes", "totalBytes"}}`: whether
+  the init has finished, whether the server answers (and has loaded its
+  data), its version, the client connections open, what the data takes of
+  `maxmemory`, and the filesystem holding the data (the volume with
+  `REDIS_DATA`).
+- `password` reads `{"password"}`, sets it on the running server (`CONFIG SET
+  requirepass`, the password on stdin, never argv) and rewrites
+  `kvbox-auth.conf` so the next start has it, printing `{"user": "default"}`.
+  A failure leaves both with the old one. Connections already open stay open.
+
+```
+kvbox new cache --base redis                       # the password is generated and printed
+kvbox new cache --base redis -e REDIS_PASSWORD=x
+```
+
 ## The gh-runner image
 
 `gh-runner/` (kvbox issue #100) is `FROM kvbox-base:local` plus GitHub's
@@ -222,6 +299,7 @@ Needs Docker; no root and no loop mount on the host.
 base/build.sh                 # -> base/out/rootfs.ext4 (8 GiB sparse, ~1.9 GB used), .sha256, .zst
 ROOTFS_SIZE=16G base/build.sh # larger disk
 postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Dockerfile first (kvbox-base:local)
+redis/build.sh                # -> redis/out/rootfs.ext4; same
 gh-runner/build.sh            # -> gh-runner/out/rootfs.ext4; same
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 ```
@@ -242,6 +320,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ```
 ./release.sh base v0.4.0        # builds, then publishes release base-v0.4.0
 ./release.sh postgres v0.1.0    # builds, then publishes release postgres-v0.1.0 (rootfs-postgres-<arch>.ext4.zst)
+./release.sh redis v0.1.0       # builds, then publishes release redis-v0.1.0 (rootfs-redis-<arch>.ext4.zst)
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ```
 

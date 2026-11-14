@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# kvbox-redis-run (kvbox #176): start Valkey with most of the box's memory. ExecStart of valkey.service.
+#
+# The box runs nothing else, so maxmemory is 75% of the memory the box really has (MemTotal, read at
+# every start, so a box given more memory uses it); the rest is the OS and the pages a fork copies
+# while the append-only file is rewritten. Full means writes are refused (noeviction in valkey.conf).
+set -euo pipefail
+
+MAXMEMORY_PERCENT=75
+
+total_kb="$(awk '$1 == "MemTotal:" { print $2 }' /proc/meminfo)"
+[[ "$total_kb" =~ ^[0-9]+$ ]] || { echo "kvbox-redis-run: no MemTotal in /proc/meminfo" >&2; exit 1; }
+maxmemory=$((total_kb * 1024 * MAXMEMORY_PERCENT / 100))
+
+exec /usr/local/bin/valkey-server /etc/valkey/valkey.conf --maxmemory "$maxmemory"

@@ -3,6 +3,7 @@
 #
 #   ./release.sh base v0.1.0        # -> release "base-v0.1.0" with rootfs-base-<arch>.ext4.zst + .sha256
 #   ./release.sh postgres v0.1.0    # -> release "postgres-v0.1.0" with rootfs-postgres-<arch>.ext4.zst + .sha256
+#   ./release.sh redis v0.1.0       # -> release "redis-v0.1.0" with rootfs-redis-<arch>.ext4.zst + .sha256
 #   ./release.sh kernel v6.1.190-1  # -> release "kernel-v6.1.190-1" with vmlinux-<arch> + .sha256
 #
 # <image>/build.sh builds and leaves the assets, named as install-server.sh expects them, in
@@ -31,6 +32,8 @@ case "$image" in
           how="ROOTFS_VERSION=$version ./install-server.sh" ;;
   postgres) what="Postgres guest image $version ($arch): the base image plus PostgreSQL $(docker run --rm kvbox-postgres:local ls /usr/lib/postgresql) (PGDG), listening on the box's IP with its own TLS certificate; role, database and password from the box's POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD, data on a volume with POSTGRES_DATA (kvbox #87, #173)."
           how="kvbox new mydb --base postgres -e POSTGRES_USER=me -e POSTGRES_DB=app" ;;
+  redis)  what="Redis guest image $version ($arch): the base image plus Valkey $(docker run --rm kvbox-redis:local valkey-server --version | sed -n 's/.* v=\([^ ]*\) .*/\1/p') (the Valkey project's own build, speaks the Redis protocol), plain on 6379 and TLS on 6380 with its own certificate, AOF persistence; password from the box's REDIS_PASSWORD, data on a volume with REDIS_DATA (kvbox #176)."
+          how="kvbox new cache --base redis" ;;
   kernel) what="Guest kernel $version ($arch): Linux $(cat "$here/kernel/out/vmlinux.version") with Firecracker's CI config plus kernel/kvbox.config (netfilter for Docker, nf_tables, FUSE)."
           how="KERNEL_VERSION=${version#v} ./install-server.sh" ;;
   *)      what="$image $version ($arch)."; how="./install-server.sh" ;;
