@@ -324,8 +324,13 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ```
 
-kvbox pins the versions it installs (`ROOTFS_VERSION` and `KERNEL_VERSION` in
-`install-server.sh`).
+Every release also rewrites `images.json` on the fixed release `index`: the latest version of each
+image and of the kernel, made from the list of releases (`./release.sh index` rewrites it alone).
+kvbox's `install-server.sh` installs what it lists, so a release is all it takes for hosts to get an
+image at their next install or update; `ROOTFS_VERSION`, `IMAGES` and `KERNEL_VERSION` pin a host by
+hand. A pre-release is left out of the list. An image whose newest version needs a newer kvbox-server
+names it in `<image>/min-server` (one line, e.g. `0.5.48`): hosts are not given that image until that
+kvbox-server is on npm.
 
 ## License
 
