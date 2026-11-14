@@ -85,6 +85,8 @@ case "$image" in
           how="kvbox new mydb --base postgres -e POSTGRES_USER=me -e POSTGRES_DB=app" ;;
   redis)  what="Redis guest image $version ($arch): the base image plus Valkey $(docker run --rm kvbox-redis:local valkey-server --version | sed -n 's/.* v=\([^ ]*\) .*/\1/p') (the Valkey project's own build, speaks the Redis protocol), plain on 6379 and TLS on 6380 with its own certificate, AOF persistence; password from the box's REDIS_PASSWORD, data on a volume with REDIS_DATA (kvbox #176)."
           how="kvbox new cache --base redis" ;;
+  garage) what="Garage guest image $version ($arch): the base image plus Garage $(docker run --rm kvbox-garage:local garage --version | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' | head -n 1) (the Garage project's own build, speaks the S3 protocol), one node on port 3900 with its data on a volume from GARAGE_DATA; scripts make buckets and their access keys. What kvbox's Object Storage runs on (kvbox #182)."
+          how="kvbox bucket create uploads" ;;
   kernel) what="Guest kernel $version ($arch): Linux $(cat "$here/kernel/out/vmlinux.version") with Firecracker's CI config plus kernel/kvbox.config (netfilter for Docker, nf_tables, FUSE)."
           how="KERNEL_VERSION=${version#v} ./install-server.sh" ;;
   *)      what="$image $version ($arch)."; how="./install-server.sh" ;;

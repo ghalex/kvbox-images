@@ -10,6 +10,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
+| `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 
@@ -174,6 +175,61 @@ The two scripts `image.json` names:
 ```
 kvbox new mydb --base postgres -e POSTGRES_PASSWORD=x -e POSTGRES_USER=me -e POSTGRES_DB=app
 ```
+
+## The garage image
+
+`garage/` (kvbox issue #182) is `FROM kvbox-base:local` plus Garage, an
+S3-compatible object store: the project's static binary
+(`garagehq.deuxfleurs.fr/_releases/v<version>/<arch>-unknown-linux-musl/garage`),
+the version and both checksums pinned in the Dockerfile (`GARAGE_VERSION`; the
+project publishes no checksums, they are of the files as downloaded). The
+server runs as the user `garage` from `garage.service`. It is what kvbox's
+Object Storage runs on: one box per account, hidden from the user, whose
+buckets and keys the control plane makes through the scripts below.
+
+```json
+{
+  "autoHibernate": false,
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-garage-status",
+    "bucket": "/usr/local/sbin/kvbox-garage-bucket",
+    "key": "/usr/local/sbin/kvbox-garage-key"
+  }
+}
+```
+
+Nothing listens until the box knows where its data goes: `garage.service` is
+skipped while `/etc/garage.toml` is missing. `kvbox-garage-init.service` runs
+at every boot until `/var/lib/kvbox/garage-init.done` exists: it waits for
+`/run/kvbox/env-ready`, reads `GARAGE_DATA` from `/etc/kvbox/env` (parsed,
+never sourced), then
+
+- requires `GARAGE_DATA=/mnt/<volume>[/<directory>]` on a mounted volume (a
+  bare `/mnt/<volume>` becomes `/mnt/<volume>/garage`); when the volume is not
+  mounted nothing is done and the next boot retries;
+- keeps everything on the volume: `meta/`, `data/` and `rpc_secret`. A box
+  whose volume is detached has no `rpc_secret`, so the server refuses to start
+  instead of starting empty on the box's own disk;
+- writes `/etc/garage.toml` (LMDB, both fsyncs on, `replication_factor = 1`,
+  RPC on localhost only, S3 on `[::]:3900`, region `us-east-1`), starts the
+  server and makes this node the whole cluster (zone `kvbox`, the volume's
+  size as capacity) unless the volume already has a layout.
+
+There is no TLS and no admin API port: kvbox's edge ends TLS, and the scripts
+use `garage json-api`, which goes over the local RPC. Each script takes one
+JSON object and prints one (the kvbox-agent `script` contract):
+
+| Script | Input | Output |
+|---|---|---|
+| `status` | none | `{ready, accepting, version, storage: {usedBytes, totalBytes}, buckets: [{name, objects, bytes}]}` |
+| `bucket` | `{"op": "create", "name"}` | `{"id"}`; a taken name is an error |
+| `bucket` | `{"op": "rm", "name"}` | `{"removed", "keys"}`; refuses a bucket that holds objects, removes the keys that open it |
+| `key` | `{"op": "create", "bucket", "name", "readOnly"}` | `{"id", "secret"}`, the only time the secret leaves the box |
+| `key` | `{"op": "rm", "id"}` | `{"removed"}` |
+
+A key opens the one bucket it was made for (read, and write unless
+`readOnly`), never with the owner permission. Logs: `journalctl -u
+kvbox-garage-init` and `journalctl -u garage`.
 
 ## The redis image
 

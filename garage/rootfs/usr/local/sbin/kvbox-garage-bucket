@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+# kvbox-garage-bucket (kvbox #182): make or remove a bucket. Named as "bucket" in /etc/kvbox/image.json.
+#
+#   {"op": "create", "name": "uploads"}   ->  {"id": "<bucket id>"}
+#   {"op": "rm", "name": "uploads"}       ->  {"removed": true, "keys": ["GK…"]}
+#
+# create   refuses a name that is taken. rm refuses a bucket that still holds objects (emptying one can
+#          take longer than a script may run), removes the keys that open it, then the bucket; a bucket
+#          that is not there is `removed: false`, not an error, so a remove can be repeated.
+import sys
+
+sys.path.insert(0, "/usr/local/lib/kvbox")
+from garage_api import api, bucket_named, fail, read_input, run, text  # noqa: E402
+
+
+def main():
+    data = read_input()
+    op = text(data, "op")
+    name = text(data, "name")
+    if op == "create":
+        if bucket_named(name) is not None:
+            fail(f"bucket {name} already exists")
+        return {"id": api("CreateBucket", {"globalAlias": name})["id"]}
+    if op == "rm":
+        info = bucket_named(name)
+        if info is None:
+            return {"removed": False, "keys": []}
+        if info.get("objects", 0) > 0 or info.get("unfinishedUploads", 0) > 0:
+            fail(f"bucket {name} is not empty: delete its objects first (it holds {info.get('objects', 0)})")
+        keys = [k["accessKeyId"] for k in info.get("keys") or []]
+        for key in keys:
+            api("DeleteKey", {"id": key})
+        api("DeleteBucket", {"id": info["id"]})
+        return {"removed": True, "keys": keys}
+    fail(f'unknown op "{op}"')
+
+
+run(main)

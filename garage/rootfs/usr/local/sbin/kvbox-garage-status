@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+# kvbox-garage-status (kvbox #182): what an object store shows about itself. Named as "status" in
+# /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
+#
+#   {"ready": true, "accepting": true, "version": "2.5.0",
+#    "storage": {"usedBytes": 2254857, "totalBytes": 10737418240},
+#    "buckets": [{"name": "uploads", "objects": 12, "bytes": 482113}]}
+#
+# ready       kvbox-garage-init has finished: the server has its data directory and its layout
+# accepting   the server answers and can store (its cluster of one is healthy)
+# version     Garage's own version
+# storage     the filesystem holding the data directory: the volume
+# buckets     every bucket with how many objects it holds and their size; absent while not accepting
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, "/usr/local/lib/kvbox")
+from garage_api import ApiError, CONF, api, run  # noqa: E402
+
+MARKER = "/var/lib/kvbox/garage-init.done"
+
+
+def version():
+    r = subprocess.run(["garage", "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+    m = re.search(r"v?(\d+\.\d+\.\d+)", r.stdout)
+    return m.group(1) if m else ""
+
+
+def data_directory():
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            m = re.search(r'^data_dir = "(.*)"$', f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def storage(path):
+    try:
+        fs = os.statvfs(path)
+    except OSError:
+        return None
+    return {"usedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize, "totalBytes": fs.f_blocks * fs.f_frsize}
+
+
+def buckets():
+    out = []
+    for b in api("ListBuckets") or []:
+        aliases = b.get("globalAliases") or []
+        if not aliases:
+            continue
+        info = api("GetBucketInfo", {"id": b["id"]})
+        out.append({"name": aliases[0], "objects": info.get("objects", 0), "bytes": info.get("bytes", 0)})
+    return sorted(out, key=lambda b: b["name"])
+
+
+def main():
+    out = {"ready": os.path.exists(MARKER), "accepting": False, "version": version()}
+    try:
+        out["accepting"] = (api("GetClusterHealth", timeout=10) or {}).get("status") == "healthy"
+        if out["accepting"]:
+            out["buckets"] = buckets()
+    except ApiError:
+        pass
+    data = data_directory()
+    space = storage(data) if data else None
+    if space:
+        out["storage"] = space
+    return out
+
+
+run(main)

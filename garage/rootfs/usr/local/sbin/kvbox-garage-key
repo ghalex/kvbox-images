@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+# kvbox-garage-key (kvbox #182): make or remove an access key of one bucket. Named as "key" in
+# /etc/kvbox/image.json.
+#
+#   {"op": "create", "bucket": "uploads", "name": "web", "readOnly": false}
+#        ->  {"id": "GK…", "secret": "<64 hex>"}       the only time the secret leaves the box
+#   {"op": "rm", "id": "GK…"}  ->  {"removed": true}
+#
+# A key opens the one bucket it was made for: read, and write unless readOnly. It can never change the
+# bucket's own settings (no owner permission). A key that is not there is `removed: false`.
+import sys
+
+sys.path.insert(0, "/usr/local/lib/kvbox")
+from garage_api import ApiError, api, bucket_named, fail, read_input, run, text  # noqa: E402
+
+
+def main():
+    data = read_input()
+    op = text(data, "op")
+    if op == "create":
+        bucket = text(data, "bucket")
+        info = bucket_named(bucket)
+        if info is None:
+            fail(f"no bucket {bucket}")
+        key = api("CreateKey", {"name": text(data, "name")})
+        try:
+            api("AllowBucketKey", {"bucketId": info["id"], "accessKeyId": key["accessKeyId"], "permissions": {"read": True, "write": data.get("readOnly") is not True, "owner": False}})
+        except ApiError:
+            api("DeleteKey", {"id": key["accessKeyId"]})
+            raise
+        return {"id": key["accessKeyId"], "secret": key["secretAccessKey"]}
+    if op == "rm":
+        try:
+            api("DeleteKey", {"id": text(data, "id")})
+        except ApiError as err:
+            if "not found" in str(err).lower() or "nosuchaccesskey" in str(err).lower():
+                return {"removed": False}
+            raise
+        return {"removed": True}
+    fail(f'unknown op "{op}"')
+
+
+run(main)

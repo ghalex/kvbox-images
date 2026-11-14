@@ -1,0 +1,21 @@
+# Garage, once kvbox-garage-init has written its configuration (kvbox #182): before that the unit is
+# skipped at boot and the init starts it. The data lives on a volume, so never before the volumes are
+# mounted; RequiresMountsFor is not used because the path is only known from /etc/garage.toml, and
+# kvbox-garage-init refuses a path that is not a mounted volume.
+[Unit]
+Description=Garage (kvbox object storage)
+ConditionPathExists=/etc/garage.toml
+After=network.target kvbox-volumes.service
+
+[Service]
+User=garage
+Group=garage
+ExecStart=/usr/local/bin/garage -c /etc/garage.toml server
+Restart=always
+RestartSec=2
+TimeoutStopSec=120
+LimitNOFILE=65536
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

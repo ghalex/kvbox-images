@@ -1,0 +1,8 @@
+{
+  "autoHibernate": false,
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-garage-status",
+    "bucket": "/usr/local/sbin/kvbox-garage-bucket",
+    "key": "/usr/local/sbin/kvbox-garage-key"
+  }
+}

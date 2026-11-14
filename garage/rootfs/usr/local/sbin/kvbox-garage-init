@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# kvbox-garage-init (kvbox #182): set Garage up on the box's volume, once per box. Run by
+# kvbox-garage-init.service, which is skipped once the marker exists.
+#
+# The host sends GARAGE_DATA (a directory on a volume, /mnt/<volume>[/…]) through kvbox-agent's "env"
+# a few seconds after boot; the agent writes /etc/kvbox/env and touches /run/kvbox/env-ready. Garage
+# does not run before this script has written /etc/garage.toml (garage.service is skipped without it).
+# So: wait for the variables, read them, then
+#   - the data directory: the volume must be mounted; when it is not (it is attached after the box was
+#     made) nothing is done and the next boot retries;
+#   - everything Garage keeps is on the volume, one level down: <data>/meta, <data>/data and
+#     <data>/rpc_secret. A detached volume leaves no rpc_secret, so Garage refuses to start instead of
+#     starting empty on the box's own disk;
+#   - write /etc/garage.toml and start garage.service;
+#   - make this node the whole cluster (one zone, the volume's size as its capacity), unless a layout
+#     is already there (a volume that held a store before);
+#   - write the marker.
+# Every step is idempotent, so an interrupted run is simply redone at the next boot.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/garage-init.done
+CONF=/etc/garage.toml
+WAIT_ENV=300      # seconds for the host's env push
+WAIT_SERVER=120   # seconds for the server to answer
+
+log() { echo "kvbox-garage-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); Garage not started, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+DATA=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      GARAGE_DATA) DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+if [[ -z "$DATA" ]]; then
+  log "GARAGE_DATA is empty or missing in $ENV_FILE: Garage keeps its data on a volume and is not started without one; retrying at next boot"
+  exit 1
+fi
+# /mnt/<volume>[/<path>]: only a mounted volume, never the box's own disk under an unmounted /mnt/<volume>.
+re_data='^/mnt/([A-Za-z0-9][A-Za-z0-9._-]*)(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+if [[ ! "$DATA" =~ $re_data ]]; then
+  log "GARAGE_DATA=\"$DATA\" is not a directory on a volume (/mnt/<volume>/<directory>); nothing done"
+  exit 1
+fi
+volume="/mnt/${BASH_REMATCH[1]}"
+if ! mountpoint -q "$volume"; then
+  log "GARAGE_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+  exit 1
+fi
+# The files sit one level down, so the server never starts on the empty mount point of a detached volume.
+[[ "$DATA" == "$volume" ]] && DATA="$volume/garage"
+
+install -d -m 0700 -o garage -g garage "$DATA" "$DATA/meta" "$DATA/data"
+if [[ ! -s "$DATA/rpc_secret" ]]; then
+  (umask 077 && openssl rand -hex 32 > "$DATA/rpc_secret.tmp")
+  chown garage:garage "$DATA/rpc_secret.tmp"
+  mv "$DATA/rpc_secret.tmp" "$DATA/rpc_secret"
+fi
+
+# $DATA has only [A-Za-z0-9._/-] (checked above), so it needs no escaping. Written beside its place and
+# renamed, so the server never reads half of it. Both fsyncs are on: a host reboot is a power cut for
+# the box, and an object the server said it stored must be there afterwards. RPC is for other nodes of
+# a cluster; there are none, so it stays on localhost (the `garage` command uses it too).
+tmp="$CONF.tmp"
+cat > "$tmp" <<TOML
+# kvbox-garage-init: this box's object storage
+metadata_dir = "$DATA/meta"
+data_dir = "$DATA/data"
+db_engine = "lmdb"
+metadata_fsync = true
+data_fsync = true
+replication_factor = 1
+
+rpc_bind_addr = "127.0.0.1:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret_file = "$DATA/rpc_secret"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+TOML
+chmod 0644 "$tmp"
+mv "$tmp" "$CONF"
+
+systemctl restart garage.service
+
+node=""
+for ((i = 0; i < WAIT_SERVER; i++)); do
+  node="$(garage -c "$CONF" node id -q 2>/dev/null | cut -d@ -f1 || true)"
+  [[ -n "$node" ]] && garage -c "$CONF" status >/dev/null 2>&1 && break
+  node=""
+  sleep 1
+done
+if [[ -z "$node" ]]; then
+  log "gave up: Garage not answering after ${WAIT_SERVER}s (journalctl -u garage); retrying at next boot"
+  exit 1
+fi
+
+# The layout says which nodes hold data. A fresh store has none (version 0); a volume that held a
+# store before comes with its own, and is left as it is.
+version="$(garage -c "$CONF" json-api GetClusterLayout | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+if [[ "$version" == "0" ]]; then
+  capacity="$(df --output=size -B1 "$volume" | tail -n 1 | tr -d ' ')"
+  garage -c "$CONF" layout assign -z kvbox -c "$capacity" "$node" >/dev/null
+  garage -c "$CONF" layout apply --version 1 >/dev/null
+  log "this node is the whole cluster"
+fi
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+log "done: Garage answers on port 3900, data in $DATA"
