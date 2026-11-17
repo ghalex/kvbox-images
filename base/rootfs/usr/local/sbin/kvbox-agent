@@ -346,10 +346,16 @@ def run_duration(unit):
     return {"durationMs": (end - start) // 1000} if 0 < start <= end else {}
 
 
-def prune_runs():
-    """Keeps the output of the newest RUNS_KEPT runs (a run's newest file dates it; .out, .err, and .log
-    from before base v0.16.0), and forgets the units of the ones removed. A run still going is never
-    touched."""
+def run_kind(run_id):
+    """Who started a run, from its id's prefix: `cron-<n>` a cron trigger, `ex_<hex>` an exec over the API."""
+    return re.split(r"[-_]", run_id, maxsplit=1)[0] if re.search(r"[-_]", run_id) else ""
+
+
+def prune_runs(starting):
+    """Keeps the output of the newest RUNS_KEPT runs of each kind (`run_kind`: the run `starting` is one of
+    its kind's), so a burst of execs never deletes a cron run before cron has asked how it ended, nor the
+    other way round. A run's newest file dates it (.out, .err, and .log from before base v0.16.0); the
+    units of the runs removed are forgotten. A run still going is never touched."""
     runs = {}  # run id -> (newest mtime, its files)
     try:
         for entry in os.scandir(RUN_DIR):
@@ -360,7 +366,8 @@ def prune_runs():
             runs[run_id] = (max(mtime, entry.stat().st_mtime), files + [entry.path])
     except OSError:
         return
-    newest = sorted(runs.items(), key=lambda kv: kv[1][0], reverse=True)
+    kind = run_kind(starting)
+    newest = sorted(((i, r) for i, r in runs.items() if run_kind(i) == kind and i != starting), key=lambda kv: kv[1][0], reverse=True)
     for run_id, (_, files) in newest[RUNS_KEPT - 1:]:  # the run about to start is one of the kept
         try:
             if run_status(run_id)["state"] == "running":
@@ -404,7 +411,7 @@ def run(run_id, command, timeout_sec):
     if run_status(run_id)["state"] != "unknown":
         return False
     os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
-    prune_runs()
+    prune_runs(run_id)
     # --expand-environment=no: the command is the shell's to read, systemd must not expand its `$VAR`s first
     sh("systemd-run", "--unit", unit, "--no-block", "--quiet", "--expand-environment=no",
        "--description", f"kvbox run {run_id}",

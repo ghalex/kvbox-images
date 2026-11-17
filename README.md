@@ -83,8 +83,9 @@ was already started); `{"op": "runStatus", "id": "…"}` then answers `running`,
 systemd unit `kvbox-run-<id>.service`: the `kvbox` user, its home, a login
 shell, the owner's variables, everything it started killed at the deadline.
 Its output is `/var/log/kvbox/runs/<id>.out` (stdout) and `<id>.err` (stderr),
-base v0.16.0 and later (one `<id>.log` with both before); the newest 50 runs are
-kept. A reboot forgets a run (`unknown`). It is what a cron trigger with a
+base v0.16.0 and later (one `<id>.log` with both before); the newest 50 runs of
+each kind are kept, the kind being the id's prefix (`cron-<n>`, `ex_<hex>`), so
+execs never push out a cron run nobody has read yet. A reboot forgets a run (`unknown`). It is what a cron trigger with a
 command runs, and what kvbox's `exec` over the API (kvbox issue #188) runs.
 `{"op": "runOutput", "id": "…", "stream": "stdout", "offset": 0, "limit": 1048576}`
 (base v0.16.0 and later) reads a run's output back: at most 1 MiB from `offset`
