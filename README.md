@@ -75,6 +75,15 @@ argv: it may hold a password), for at most 30 seconds, and answers
 `{"ok": true, "output": <the JSON the script printed>}`; a non-zero exit is an
 error carrying the script's last stderr line. It is how the host asks an image
 something only the image knows, such as a managed Postgres's status.
+`{"op": "run", "id": "…", "command": "node ~/app/embed.js", "timeoutSec": 600}`
+(base v0.15.0 and later, kvbox issue #190) starts a command of the box owner's
+and answers at once with `{"ok": true, "started": true}` (`false` when that id
+was already started); `{"op": "runStatus", "id": "…"}` then answers `running`,
+`exited` with `exitCode`, `timeout` or `unknown`. The command is a transient
+systemd unit `kvbox-run-<id>.service`: the `kvbox` user, its home, a login
+shell, the owner's variables, everything it started killed at the deadline.
+Its output is `/var/log/kvbox/runs/<id>.log`; the newest 50 are kept. A reboot
+forgets a run (`unknown`). It is what a cron trigger with a command runs.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot

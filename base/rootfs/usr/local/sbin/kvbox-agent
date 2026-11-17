@@ -20,6 +20,10 @@
 #                                       -> {"ok": true, "idle": true}
 #   {"op": "script", "path": "/usr/local/sbin/kvbox-postgres-status", "input": {"any": "json"}}
 #                                       -> {"ok": true, "output": {"any": "json"}}
+#   {"op": "run", "id": "cr_8f3a", "command": "node ~/app/embed.js", "timeoutSec": 600}
+#                                       -> {"ok": true, "started": true}
+#   {"op": "runStatus", "id": "cr_8f3a"}
+#                                       -> {"ok": true, "state": "exited", "exitCode": 0}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -45,13 +49,23 @@
 # `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
 # and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
 # check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
-# own thread so a slow script never holds up another request; every op but "idle" and "script" still runs one at a time.
+# own thread so a slow script never holds up another request; every op but "idle", "script" and "runStatus" still runs one at a time.
 # "script" is how the host asks an image something only the image knows (kvbox issue #173: a managed
 # Postgres's status, a password reset). The image names its scripts in /etc/kvbox/image.json
 # ("scripts"), the host sends the path; it is run as root with "input" (any JSON, null when absent) as
 # one JSON line on stdin, at most SCRIPT_TIMEOUT seconds, and must print one JSON value, which comes
 # back as "output". A non-zero exit is an error carrying the last line the script wrote to stderr.
 # Input goes over stdin, never argv: it may hold a password.
+# "run" starts a command of the box owner's and does not wait for it (kvbox issue #190: a cron trigger
+# that runs a command; the host asks "runStatus" until it is over). The command is a transient systemd
+# unit, kvbox-run-<id>.service, never a child of this agent: it outlives an agent restart, systemd kills
+# everything it started when "timeoutSec" is up, and systemd is what remembers how it ended. It runs as
+# the kvbox user in its home through a login shell (`bash -lc`), with the owner's variables
+# (/etc/kvbox/env), and what it prints goes to /var/log/kvbox/runs/<id>.log, of which the newest
+# RUNS_KEPT are kept. The same id twice starts nothing ("started": false): the host may ask again
+# after an answer it never got. "runStatus" answers "running", "exited" (with "exitCode"; 128 + the
+# signal for a command a signal ended), "timeout" (killed at its deadline) or "unknown": no such run,
+# which is also what a run becomes when the box restarts, since systemd's memory of it is gone.
 # Errors come back as {"ok": false, "error"}.
 import glob
 import json
@@ -272,7 +286,81 @@ def script(path, data):
         raise ValueError(f"script {path} did not print JSON") from None
 
 
-UNLOCKED_OPS = ("idle", "script")  # they run something that may be slow
+RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+RUN_DIR = "/var/log/kvbox/runs"
+RUN_MAX_COMMAND = 8 * 1024
+RUN_MAX_TIMEOUT = 24 * 3600
+RUNS_KEPT = 50
+
+
+def run_unit(run_id):
+    if not isinstance(run_id, str) or not RUN_ID.match(run_id):
+        raise ValueError("run: 'id' must be 1 to 64 letters, digits, '_' or '-'")
+    return f"kvbox-run-{run_id}.service"
+
+
+def run_status(run_id):
+    r = subprocess.run(
+        ["systemctl", "show", run_unit(run_id), "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+         "-p", "Result", "-p", "ExecMainCode", "-p", "ExecMainStatus"],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    unit = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    active, sub = unit.get("ActiveState"), unit.get("SubState")
+    if unit.get("LoadState") != "loaded" or active == "inactive":
+        return {"state": "unknown"}
+    if active in ("activating", "deactivating") or (active == "active" and sub != "exited"):
+        return {"state": "running"}
+    if unit.get("Result") == "timeout":
+        return {"state": "timeout"}
+    status = int(unit.get("ExecMainStatus") or 0)
+    # ExecMainCode: 1 is a plain exit, anything else a signal (2 killed, 3 dumped core)
+    return {"state": "exited", "exitCode": status if unit.get("ExecMainCode") in ("0", "1") else 128 + status}
+
+
+def prune_runs():
+    """Keeps the newest RUNS_KEPT output files, and forgets the units of the ones removed. A run still
+    going is never touched."""
+    try:
+        files = sorted((e for e in os.scandir(RUN_DIR) if e.name.endswith(".log")), key=lambda e: e.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for entry in files[RUNS_KEPT - 1:]:  # the run about to start is one of the kept
+        run_id = entry.name[: -len(".log")]
+        try:
+            if run_status(run_id)["state"] == "running":
+                continue
+            unit = run_unit(run_id)
+            subprocess.run(["systemctl", "stop", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["systemctl", "reset-failed", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.unlink(entry.path)
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            continue
+
+
+def run(run_id, command, timeout_sec):
+    unit = run_unit(run_id)
+    if not isinstance(command, str) or not command.strip() or "\0" in command or len(command.encode()) > RUN_MAX_COMMAND:
+        raise ValueError(f"run: 'command' must be a non-empty string of at most {RUN_MAX_COMMAND} bytes")
+    if not isinstance(timeout_sec, int) or isinstance(timeout_sec, bool) or not 1 <= timeout_sec <= RUN_MAX_TIMEOUT:
+        raise ValueError(f"run: 'timeoutSec' must be a whole number from 1 to {RUN_MAX_TIMEOUT}")
+    if run_status(run_id)["state"] != "unknown":
+        return False
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    prune_runs()
+    # --expand-environment=no: the command is the shell's to read, systemd must not expand its `$VAR`s first
+    sh("systemd-run", "--unit", unit, "--no-block", "--quiet", "--expand-environment=no",
+       "--description", f"kvbox run {run_id}",
+       "-p", f"User={SSH_USER}", "-p", "WorkingDirectory=~",
+       "-p", f"EnvironmentFile=-{ENV_FILE}",
+       "-p", f"RuntimeMaxSec={timeout_sec}",
+       # the unit stays after a clean exit, so its exit code can still be asked for
+       "-p", "RemainAfterExit=yes",
+       "-p", f"StandardOutput=append:{os.path.join(RUN_DIR, run_id + '.log')}", "-p", "StandardError=inherit",
+       "--", "/bin/bash", "-lc", command)
+    return True
+
+
+UNLOCKED_OPS = ("idle", "script", "runStatus")  # they run something that may be slow
 
 
 def handle(req):
@@ -305,6 +393,13 @@ def handle(req):
         return {"ok": True, "idle": idle(req.get("path"))}
     if op == "script":
         return {"ok": True, "output": script(req.get("path"), req.get("input"))}
+    if op == "run":
+        started = run(req.get("id"), req.get("command"), req.get("timeoutSec"))
+        if started:
+            log(f"run {req['id']} started (at most {req['timeoutSec']} s)")
+        return {"ok": True, "started": started}
+    if op == "runStatus":
+        return {"ok": True, **run_status(req.get("id"))}
     raise ValueError(f"unknown op {op!r}")
 
 
