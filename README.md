@@ -82,8 +82,17 @@ was already started); `{"op": "runStatus", "id": "…"}` then answers `running`,
 `exited` with `exitCode`, `timeout` or `unknown`. The command is a transient
 systemd unit `kvbox-run-<id>.service`: the `kvbox` user, its home, a login
 shell, the owner's variables, everything it started killed at the deadline.
-Its output is `/var/log/kvbox/runs/<id>.log`; the newest 50 are kept. A reboot
-forgets a run (`unknown`). It is what a cron trigger with a command runs.
+Its output is `/var/log/kvbox/runs/<id>.out` (stdout) and `<id>.err` (stderr),
+base v0.16.0 and later (one `<id>.log` with both before); the newest 50 runs are
+kept. A reboot forgets a run (`unknown`). It is what a cron trigger with a
+command runs, and what kvbox's `exec` over the API (kvbox issue #188) runs.
+`{"op": "runOutput", "id": "…", "stream": "stdout", "offset": 0, "limit": 1048576}`
+(base v0.16.0 and later) reads a run's output back: at most 1 MiB from `offset`
+of `stdout` or `stderr`, answered as `{"ok": true, "size", "offset", "data"}`
+with `data` in base64 (a command may print bytes that are not UTF-8, and a cut
+may fall inside a character) and `size` the stream's whole length, so the asker
+knows what it did not get. No file is size 0, never an error. A run from base
+v0.15.x has only the `.log`: it reads as stdout, with stderr empty.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot

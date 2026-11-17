@@ -24,6 +24,8 @@
 #                                       -> {"ok": true, "started": true}
 #   {"op": "runStatus", "id": "cr_8f3a"}
 #                                       -> {"ok": true, "state": "exited", "exitCode": 0, "durationMs": 34}
+#   {"op": "runOutput", "id": "cr_8f3a", "stream": "stdout", "offset": 0, "limit": 1048576}
+#                                       -> {"ok": true, "size": 12, "offset": 0, "data": "aGVsbG8gd29ybGQK"}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -49,7 +51,7 @@
 # `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
 # and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
 # check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
-# own thread so a slow script never holds up another request; every op but "idle", "script" and "runStatus" still runs one at a time.
+# own thread so a slow script never holds up another request; every op but "idle", "script", "runStatus" and "runOutput" still runs one at a time.
 # "script" is how the host asks an image something only the image knows (kvbox issue #173: a managed
 # Postgres's status, a password reset). The image names its scripts in /etc/kvbox/image.json
 # ("scripts"), the host sends the path; it is run as root with "input" (any JSON, null when absent) as
@@ -61,14 +63,22 @@
 # unit, kvbox-run-<id>.service, never a child of this agent: it outlives an agent restart, systemd kills
 # everything it started when "timeoutSec" is up, and systemd is what remembers how it ended. It runs as
 # the kvbox user in its home through a login shell (`bash -lc`), with the owner's variables
-# (/etc/kvbox/env), and what it prints goes to /var/log/kvbox/runs/<id>.log, of which the newest
-# RUNS_KEPT are kept. The same id twice starts nothing ("started": false): the host may ask again
+# (/etc/kvbox/env), and what it prints goes to /var/log/kvbox/runs/<id>.out (stdout) and <id>.err
+# (stderr), of which the newest RUNS_KEPT runs are kept. The same id twice starts nothing ("started": false): the host may ask again
 # after an answer it never got. "runStatus" answers "running", "exited" (with "exitCode"; 128 + the
 # signal for a command a signal ended), "timeout" (killed at its deadline) or "unknown": no such run,
 # which is also what a run becomes when the box restarts, since systemd's memory of it is gone.
 # An ended run also carries "durationMs", how long the command itself ran by systemd's own clock: the
 # host only learns of the end at its next question, seconds later, so its own count would be too long.
+# "runOutput" reads a run's output back (kvbox issue #188: `exec` over the API): "stream" is "stdout" or
+# "stderr", at most "limit" bytes (RUN_OUTPUT_MAX, 1 MiB) from "offset". "data" is those bytes in base64
+# (a command may print anything, and a cut may fall inside a UTF-8 character), "size" the file's whole
+# length, so the asker knows what it did not get. A run with no file (not started yet, pruned, or one
+# that never wrote to that stream) is size 0, never an error. A run started by an agent from before
+# this op (base v0.15.x) has a single <id>.log with both streams together: it is read as stdout, and
+# its stderr is empty.
 # Errors come back as {"ok": false, "error"}.
+import base64
 import glob
 import json
 import os
@@ -293,6 +303,10 @@ RUN_DIR = "/var/log/kvbox/runs"
 RUN_MAX_COMMAND = 8 * 1024
 RUN_MAX_TIMEOUT = 24 * 3600
 RUNS_KEPT = 50
+# What a run writes, by stream; ".log" is a run from base v0.15.x, both streams in one file.
+RUN_STREAMS = {"stdout": ".out", "stderr": ".err"}
+RUN_FILES = (".out", ".err", ".log")
+RUN_OUTPUT_MAX = 1 << 20
 
 
 def run_unit(run_id):
@@ -333,23 +347,52 @@ def run_duration(unit):
 
 
 def prune_runs():
-    """Keeps the newest RUNS_KEPT output files, and forgets the units of the ones removed. A run still
-    going is never touched."""
+    """Keeps the output of the newest RUNS_KEPT runs (a run's newest file dates it; .out, .err, and .log
+    from before base v0.16.0), and forgets the units of the ones removed. A run still going is never
+    touched."""
+    runs = {}  # run id -> (newest mtime, its files)
     try:
-        files = sorted((e for e in os.scandir(RUN_DIR) if e.name.endswith(".log")), key=lambda e: e.stat().st_mtime, reverse=True)
+        for entry in os.scandir(RUN_DIR):
+            run_id, ext = os.path.splitext(entry.name)
+            if ext not in RUN_FILES:
+                continue
+            mtime, files = runs.get(run_id, (0.0, []))
+            runs[run_id] = (max(mtime, entry.stat().st_mtime), files + [entry.path])
     except OSError:
         return
-    for entry in files[RUNS_KEPT - 1:]:  # the run about to start is one of the kept
-        run_id = entry.name[: -len(".log")]
+    newest = sorted(runs.items(), key=lambda kv: kv[1][0], reverse=True)
+    for run_id, (_, files) in newest[RUNS_KEPT - 1:]:  # the run about to start is one of the kept
         try:
             if run_status(run_id)["state"] == "running":
                 continue
             unit = run_unit(run_id)
             subprocess.run(["systemctl", "stop", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["systemctl", "reset-failed", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            os.unlink(entry.path)
+            for path in files:
+                os.unlink(path)
         except (OSError, ValueError, subprocess.CalledProcessError):
             continue
+
+
+def run_output(run_id, stream, offset, limit):
+    run_unit(run_id)  # checks the id
+    if stream not in RUN_STREAMS:
+        raise ValueError("runOutput: 'stream' must be stdout or stderr")
+    for name, value, top in (("offset", offset, None), ("limit", limit, RUN_OUTPUT_MAX)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or (top is not None and value > top):
+            raise ValueError(f"runOutput: '{name}' must be a whole number from 0{'' if top is None else f' to {top}'}")
+    path = os.path.join(RUN_DIR, run_id + RUN_STREAMS[stream])
+    old = os.path.join(RUN_DIR, run_id + ".log")
+    if stream == "stdout" and not os.path.exists(path) and os.path.exists(old):
+        path = old
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            f.seek(offset)
+            data = f.read(limit) if offset < size else b""
+    except FileNotFoundError:
+        size, data = 0, b""
+    return {"size": size, "offset": offset, "data": base64.b64encode(data).decode("ascii")}
 
 
 def run(run_id, command, timeout_sec):
@@ -370,12 +413,13 @@ def run(run_id, command, timeout_sec):
        "-p", f"RuntimeMaxSec={timeout_sec}",
        # the unit stays after a clean exit, so its exit code can still be asked for
        "-p", "RemainAfterExit=yes",
-       "-p", f"StandardOutput=append:{os.path.join(RUN_DIR, run_id + '.log')}", "-p", "StandardError=inherit",
+       "-p", f"StandardOutput=append:{os.path.join(RUN_DIR, run_id + RUN_STREAMS['stdout'])}",
+       "-p", f"StandardError=append:{os.path.join(RUN_DIR, run_id + RUN_STREAMS['stderr'])}",
        "--", "/bin/bash", "-lc", command)
     return True
 
 
-UNLOCKED_OPS = ("idle", "script", "runStatus")  # they run something that may be slow
+UNLOCKED_OPS = ("idle", "script", "runStatus", "runOutput")  # they run something that may be slow, or read up to a MiB
 
 
 def handle(req):
@@ -415,6 +459,8 @@ def handle(req):
         return {"ok": True, "started": started}
     if op == "runStatus":
         return {"ok": True, **run_status(req.get("id"))}
+    if op == "runOutput":
+        return {"ok": True, **run_output(req.get("id"), req.get("stream"), req.get("offset", 0), req.get("limit", RUN_OUTPUT_MAX))}
     raise ValueError(f"unknown op {op!r}")
 
 
