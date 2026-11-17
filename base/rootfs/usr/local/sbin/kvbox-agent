@@ -23,7 +23,7 @@
 #   {"op": "run", "id": "cr_8f3a", "command": "node ~/app/embed.js", "timeoutSec": 600}
 #                                       -> {"ok": true, "started": true}
 #   {"op": "runStatus", "id": "cr_8f3a"}
-#                                       -> {"ok": true, "state": "exited", "exitCode": 0}
+#                                       -> {"ok": true, "state": "exited", "exitCode": 0, "durationMs": 34}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -66,6 +66,8 @@
 # after an answer it never got. "runStatus" answers "running", "exited" (with "exitCode"; 128 + the
 # signal for a command a signal ended), "timeout" (killed at its deadline) or "unknown": no such run,
 # which is also what a run becomes when the box restarts, since systemd's memory of it is gone.
+# An ended run also carries "durationMs", how long the command itself ran by systemd's own clock: the
+# host only learns of the end at its next question, seconds later, so its own count would be too long.
 # Errors come back as {"ok": false, "error"}.
 import glob
 import json
@@ -302,7 +304,8 @@ def run_unit(run_id):
 def run_status(run_id):
     r = subprocess.run(
         ["systemctl", "show", run_unit(run_id), "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
-         "-p", "Result", "-p", "ExecMainCode", "-p", "ExecMainStatus"],
+         "-p", "Result", "-p", "ExecMainCode", "-p", "ExecMainStatus",
+         "-p", "ExecMainStartTimestampMonotonic", "-p", "ExecMainExitTimestampMonotonic"],
         check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     unit = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
     active, sub = unit.get("ActiveState"), unit.get("SubState")
@@ -310,11 +313,23 @@ def run_status(run_id):
         return {"state": "unknown"}
     if active in ("activating", "deactivating") or (active == "active" and sub != "exited"):
         return {"state": "running"}
+    took = run_duration(unit)
     if unit.get("Result") == "timeout":
-        return {"state": "timeout"}
+        return {"state": "timeout", **took}
     status = int(unit.get("ExecMainStatus") or 0)
     # ExecMainCode: 1 is a plain exit, anything else a signal (2 killed, 3 dumped core)
-    return {"state": "exited", "exitCode": status if unit.get("ExecMainCode") in ("0", "1") else 128 + status}
+    return {"state": "exited", "exitCode": status if unit.get("ExecMainCode") in ("0", "1") else 128 + status, **took}
+
+
+def run_duration(unit):
+    """How long the command ran, from systemd's start and exit times (microseconds since boot); nothing
+    when either is missing (a command that never started has no start)."""
+    try:
+        start = int(unit.get("ExecMainStartTimestampMonotonic") or 0)
+        end = int(unit.get("ExecMainExitTimestampMonotonic") or 0)
+    except ValueError:
+        return {}
+    return {"durationMs": (end - start) // 1000} if 0 < start <= end else {}
 
 
 def prune_runs():
