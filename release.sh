@@ -81,7 +81,7 @@ assets=("$rel"/*)
 case "$image" in
   base)   what="Base guest image $version ($arch): Ubuntu 24.04 with Python 3, Node.js 22, Docker, nginx (for kvbox deploy), Claude Code and kvbox-agent (vsock control channel for snapshot restores)."
           how="ROOTFS_VERSION=$version ./install-server.sh" ;;
-  postgres) what="Postgres guest image $version ($arch): the base image plus PostgreSQL $(docker run --rm kvbox-postgres:local ls /usr/lib/postgresql) (PGDG), listening on the box's IP with its own TLS certificate; role, database and password from the box's POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD, data on a volume with POSTGRES_DATA (kvbox #87, #173)."
+  postgres) what="Postgres guest image $version ($arch): the base image plus PostgreSQL $(docker run --rm kvbox-postgres:local ls /usr/lib/postgresql) and pgvector (PGDG), listening on the box's IP with its own TLS certificate; role, database and password from the box's POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD, data on a volume with POSTGRES_DATA (kvbox #87, #173)."
           how="kvbox new mydb --base postgres -e POSTGRES_USER=me -e POSTGRES_DB=app" ;;
   redis)  what="Redis guest image $version ($arch): the base image plus Valkey $(docker run --rm kvbox-redis:local valkey-server --version | sed -n 's/.* v=\([^ ]*\) .*/\1/p') (the Valkey project's own build, speaks the Redis protocol), plain on 6379 and TLS on 6380 with its own certificate, AOF persistence; password from the box's REDIS_PASSWORD, data on a volume with REDIS_DATA (kvbox #176)."
           how="kvbox new cache --base redis" ;;

@@ -1,5 +1,6 @@
 # kvbox postgres image (kvbox #87, #173): the base image plus PostgreSQL 18 from the PostgreSQL
-# project's own apt repository (PGDG), listening on the box's IP.
+# project's own apt repository (PGDG), listening on the box's IP, with pgvector installed (not
+# enabled: the database's own role runs CREATE EXTENSION vector, which the build marks trusted).
 # Built by postgres/build.sh, which first builds base/ as kvbox-base:local; never run as a container.
 #
 # A cluster is created at build time; the role, database and password the box owner asked for
@@ -12,9 +13,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG PG_MAJOR=18
 RUN apt-get update && apt-get install -y --no-install-recommends postgresql-common \
     && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
-    && apt-get install -y --no-install-recommends "postgresql-$PG_MAJOR" \
+    && apt-get install -y --no-install-recommends "postgresql-$PG_MAJOR" "postgresql-$PG_MAJOR-pgvector" \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/postgresql* /usr/share/postgresql/*/man \
     && test "$(ls /usr/lib/postgresql)" = "$PG_MAJOR" && test -d "/var/lib/postgresql/$PG_MAJOR/main" \
+    # The role is never a superuser and pgvector does not ship as a trusted extension, so mark it
+    # trusted here: then a database owner can CREATE EXTENSION vector itself (the install script
+    # runs as the bootstrap superuser, as for any trusted extension). Refuse a control file that
+    # already says something about trust: that is a pgvector change to read before overriding.
+    && vector="/usr/share/postgresql/$PG_MAJOR/extension/vector.control" \
+    && test -f "$vector" && ! grep -q "^trusted" "$vector" \
+    && printf 'trusted = true\n' >> "$vector" \
     && conf="/etc/postgresql/$PG_MAJOR/main" \
     # Every address: the host firewall decides who reaches a box (isolated unless linked).
     && sed -i "s/^#\?listen_addresses\s*=.*/listen_addresses = '*'/" "$conf/postgresql.conf" \

@@ -8,7 +8,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | Image | Release tag | Contents |
 |---|---|---|
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
-| `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
+| `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 and pgvector from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
@@ -116,7 +116,13 @@ writable root.
 
 `postgres/` (kvbox issues #87, #173) is `FROM kvbox-base:local` plus
 `postgresql-18` from the PostgreSQL project's apt repository (PGDG), so minor
-releases arrive with each image release. A cluster is created at build time with
+releases arrive with each image release, and `postgresql-18-pgvector` from the
+same repository. pgvector is installed, not enabled. It does not ship as a
+trusted extension, and the database's role is never a superuser, so the build
+appends `trusted = true` to `vector.control`: the role runs `CREATE EXTENSION
+vector` itself, and the install script runs as the bootstrap superuser like any
+trusted extension's. The build fails if a pgvector release starts saying
+anything about trust itself, so the override is reread rather than stacked. A cluster is created at build time with
 `listen_addresses = '*'` and `pg_hba.conf` allowing `host all all 0.0.0.0/0`
 and `::/0` with scram-sha-256: the host firewall decides who reaches a box
 (boxes are isolated unless linked). `postgresql.service` starts at boot.
