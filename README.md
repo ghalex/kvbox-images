@@ -12,7 +12,9 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
+| `android/` | `android-vX.Y.Z` | Everything in `base` plus Java 17, Maven, the Android SDK's command-line tools, platform-tools (adb) and build-tools, Appium with the UiAutomator2 driver; Android itself runs as a [Redroid](https://github.com/remote-android/redroid-doc) container started at boot. Boots the android kernel (see [The android image](#the-android-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
+| `kernel-android/` | `kernel-android-vX.Y.Z-N` | The same kernel plus `kernel/android.config` (binder); booted only by boxes of an image that asks for it |
 
 ## Why our own kernel
 
@@ -374,6 +376,41 @@ Without a URL or token it does nothing and leaves no marker. Its log is
 kvbox new ci --base gh-runner -e GITHUB_URL=https://github.com/<owner>/<repo> -e GITHUB_RUNNER_TOKEN=<token>
 ```
 
+## The android image
+
+`android/` is `FROM kvbox-base:local` plus what testing an Android app with
+Appium takes: `openjdk-17-jdk-headless`, `maven`, the Android SDK in
+`/opt/android-sdk` (command-line tools, platform-tools for `adb`, build-tools
+for `apksigner` and `aapt2`) and Appium with the UiAutomator2 driver
+(`APPIUM_HOME=/opt/appium`). `/etc/profile.d/kvbox-android.sh` puts them on
+every login shell's PATH.
+
+Android is not emulated: `kvbox-android.service` runs a
+[Redroid](https://github.com/remote-android/redroid-doc) container (Android's
+own processes on the box's kernel, `redroid/redroid:14.0.0-latest` by default,
+pulled at the first boot), publishes its adb on `127.0.0.1:5555`, connects the
+`kvbox` user's adb to it and waits until Android has booted. Android's `/data`
+(installed apps and their files) is `/var/lib/redroid`, kept across restarts.
+The box's variables `REDROID_IMAGE` and `REDROID_ARGS` (extra boot properties,
+e.g. `androidboot.redroid_width=1080`) change what runs at the next start.
+There is no GPU: Android draws in software (`redroid_gpu_mode=guest`).
+`kvbox-appium.service` then runs Appium as `kvbox` on port 4723; it has no
+login, so publish the port only if tests run outside the box.
+
+Android talks through binder, which the usual kernel leaves out. The image's
+`image.json` says `"kernel": "android"`, so kvbox boots its boxes with the
+android kernel (`kernel-android/`: `kernel/kvbox.config` plus
+`kernel/android.config`) and every other box keeps the kernel without binder.
+On a box whose kernel has no binder, `kvbox-android.service` fails and says so.
+
+```
+kvbox new phone --base android --size l
+kvbox exec phone -- adb devices              # localhost:5555  device
+kvbox exec phone -- 'adb install app.apk'    # then point Appium at udid localhost:5555
+```
+
+Give the box room: the Redroid image and Android's data live on its disk.
+
 ## Build
 
 Needs Docker; no root and no loop mount on the host.
@@ -384,7 +421,9 @@ ROOTFS_SIZE=16G base/build.sh # larger disk
 postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Dockerfile first (kvbox-base:local)
 redis/build.sh                # -> redis/out/rootfs.ext4; same
 gh-runner/build.sh            # -> gh-runner/out/rootfs.ext4; same
+android/build.sh              # -> android/out/rootfs.ext4 (10 GiB sparse); same
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
+kernel-android/build.sh       # -> kernel-android/out/vmlinux: the same plus kernel/android.config
 ```
 
 The image build (`lib/build-rootfs.sh`, shared by every rootfs image) runs
@@ -405,6 +444,8 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ./release.sh postgres v0.1.0    # builds, then publishes release postgres-v0.1.0 (rootfs-postgres-<arch>.ext4.zst)
 ./release.sh redis v0.1.0       # builds, then publishes release redis-v0.1.0 (rootfs-redis-<arch>.ext4.zst)
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
+./release.sh android v0.1.0     # builds, then publishes release android-v0.1.0 (rootfs-android-<arch>.ext4.zst)
+./release.sh kernel-android v6.1.190-1  # builds, then publishes release kernel-android-v6.1.190-1 (vmlinux-android-<arch>)
 ```
 
 Every release also rewrites `images.json` on the fixed release `index`: the latest version of each

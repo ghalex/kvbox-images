@@ -3,13 +3,18 @@
 #
 #   kernel/build.sh                 # needs Docker (BuildKit); ~5-10 minutes, cached afterwards
 #
+# kernel-android/build.sh runs this same script with KERNEL_CONFIGS (the fragments to merge),
+# KERNEL_OUT (where the build lands) and KERNEL_ASSET (the release asset's name, before -<arch>).
+#
 # Flow: a Docker build fetches the pinned Linux 6.1 tarball from kernel.org, merges
 # firecracker-ci-x86_64-6.1.config with kvbox.config and compiles vmlinux; the output stage
 # is copied to out/. x86_64 only for now.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-out="$here/out"
+out="${KERNEL_OUT:-$here/out}"
+configs="${KERNEL_CONFIGS:-kvbox.config}"
+asset="${KERNEL_ASSET:-vmlinux}"
 arch="$(uname -m)"
 
 # Pinned Linux release and the sha256 of its tarball (from kernel.org's sha256sums.asc).
@@ -28,11 +33,12 @@ docker info >/dev/null 2>&1 || fail "docker daemon is not running (or you are no
 mkdir -p "$out"
 rm -f "$out"/vmlinux "$out"/vmlinux.* "$out"/release/*
 
-step "Building Linux $KERNEL_VERSION with kvbox.config (first build takes a few minutes)"
+step "Building Linux $KERNEL_VERSION with $configs (first build takes a few minutes)"
 # The output stage is streamed out as a tar so the files end up owned by the caller
 # (BuildKit's directory exporter tries to chown them to root and fails for a normal user).
 docker build -q --target out --output type=tar,dest=- \
   --build-arg KERNEL_VERSION="$KERNEL_VERSION" --build-arg KERNEL_SHA256="$KERNEL_SHA256" \
+  --build-arg KERNEL_CONFIGS="$configs" \
   "$here" | tar -xf - -C "$out" vmlinux vmlinux.config
 [[ -s "$out/vmlinux" ]] || fail "the build produced no vmlinux"
 ok "vmlinux: $(du -h "$out/vmlinux" | cut -f1)"
@@ -41,8 +47,8 @@ step "Checksum and release assets"
 (cd "$out" && sha256sum vmlinux > vmlinux.sha256)
 rel="$out/release"
 rm -rf "$rel" && mkdir -p "$rel"
-cp "$out/vmlinux" "$rel/vmlinux-$arch"
-(cd "$rel" && sha256sum "vmlinux-$arch" > "vmlinux-$arch.sha256")
+cp "$out/vmlinux" "$rel/$asset-$arch"
+(cd "$rel" && sha256sum "$asset-$arch" > "$asset-$arch.sha256")
 echo "$KERNEL_VERSION" > "$out/vmlinux.version"
 ok "release assets in $rel"
 

@@ -1,0 +1,19 @@
+# Android in the box: the Redroid container, started at every boot and connected to the kvbox user's adb
+# as localhost:5555. Not a container restart policy: dockerd is socket-activated, so systemd owns the start.
+[Unit]
+Description=kvbox: Android (Redroid) on localhost:5555
+Wants=network-online.target
+After=network-online.target docker.socket kvbox-agent.service
+Requires=docker.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/kvbox/env
+# The first boot pulls the image (about 1 GB), then Android takes a minute to come up.
+TimeoutStartSec=15min
+ExecStart=/usr/local/sbin/kvbox-android start
+ExecStop=/usr/local/sbin/kvbox-android stop
+
+[Install]
+WantedBy=multi-user.target

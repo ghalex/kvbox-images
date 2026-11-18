@@ -1,0 +1,20 @@
+# Appium on port 4723, as the kvbox user, once Android is up. Reachable from inside the box; publish the
+# port (kvbox vm proxy add) only if tests run elsewhere: Appium has no login of its own.
+[Unit]
+Description=kvbox: Appium server on port 4723
+After=kvbox-android.service
+Wants=kvbox-android.service
+
+[Service]
+User=kvbox
+WorkingDirectory=/home/kvbox
+Environment=JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+Environment=ANDROID_HOME=/opt/android-sdk
+Environment=ANDROID_SDK_ROOT=/opt/android-sdk
+Environment=APPIUM_HOME=/opt/appium
+Environment=PATH=/opt/android-sdk/platform-tools:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/appium --address 0.0.0.0 --port 4723
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

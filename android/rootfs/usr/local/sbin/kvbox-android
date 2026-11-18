@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# kvbox-android start|stop: run Android (Redroid) in a container and connect the kvbox user's adb to it.
+#
+# The box's variables can change what runs (kvbox env set … --box <box>, then a restart):
+#   REDROID_IMAGE   the Redroid image (default redroid/redroid:14.0.0-latest)
+#   REDROID_ARGS    extra Android boot properties, e.g. "androidboot.redroid_width=1080 androidboot.redroid_height=2400"
+# Android's data (/data: installed apps, their files) is kept in /var/lib/redroid across restarts.
+set -euo pipefail
+
+image="${REDROID_IMAGE:-redroid/redroid:14.0.0-latest}"
+name=redroid
+serial=localhost:5555
+
+as_kvbox_adb() { runuser -u kvbox -- adb "$@"; }
+
+case "${1:-}" in
+  start)
+    grep -qw binder /proc/filesystems \
+      || { echo "this box's kernel has no binder, so Android cannot start: the android image needs the android kernel on its host (install-server.sh --update)" >&2; exit 1; }
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      echo "downloading $image (first boot only)"
+      docker pull -q "$image"
+    fi
+    mkdir -p /var/lib/redroid
+    # shellcheck disable=SC2086  # REDROID_ARGS is a list of words on purpose
+    docker run -d --name "$name" --privileged -p 127.0.0.1:5555:5555 -v /var/lib/redroid:/data \
+      "$image" androidboot.redroid_gpu_mode=guest ${REDROID_ARGS:-} >/dev/null
+    echo "waiting for Android to boot"
+    for _ in $(seq 1 120); do
+      as_kvbox_adb connect "$serial" >/dev/null 2>&1 || true
+      if [[ "$(as_kvbox_adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then
+        echo "Android is up: adb -s $serial"
+        exit 0
+      fi
+      docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep -q true \
+        || { echo "the Android container stopped:" >&2; docker logs --tail 20 "$name" >&2 || true; exit 1; }
+      sleep 5
+    done
+    echo "Android did not finish booting in 10 minutes" >&2
+    exit 1
+    ;;
+  stop)
+    as_kvbox_adb disconnect "$serial" >/dev/null 2>&1 || true
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "usage: kvbox-android start|stop" >&2
+    exit 2
+    ;;
+esac

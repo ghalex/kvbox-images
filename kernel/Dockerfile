@@ -4,6 +4,9 @@
 FROM ubuntu:24.04 AS build
 ARG KERNEL_VERSION
 ARG KERNEL_SHA256
+# The config fragments merged on top of Firecracker's CI config: kvbox.config, plus android.config for
+# the android kernel (kernel-android/build.sh).
+ARG KERNEL_CONFIGS="kvbox.config"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential bc bison flex libelf-dev libssl-dev cpio xz-utils \
@@ -15,11 +18,11 @@ RUN curl -fsSL --retry 3 -o linux.tar.xz "https://cdn.kernel.org/pub/linux/kerne
     && echo "${KERNEL_SHA256}  linux.tar.xz" | sha256sum -c - \
     && tar -xf linux.tar.xz --strip-components=1 && rm linux.tar.xz
 
-COPY firecracker-ci-x86_64-6.1.config kvbox.config /cfg/
-RUN scripts/kconfig/merge_config.sh -m -O . /cfg/firecracker-ci-x86_64-6.1.config /cfg/kvbox.config >/dev/null \
+COPY *.config /cfg/
+RUN scripts/kconfig/merge_config.sh -m -O . /cfg/firecracker-ci-x86_64-6.1.config $(printf '/cfg/%s ' $KERNEL_CONFIGS) >/dev/null \
     && make olddefconfig >/dev/null \
-    # Every option kvbox.config asks for must have survived olddefconfig.
-    && missing=0; for want in $(grep -E '^CONFIG_' /cfg/kvbox.config); do \
+    # Every option the fragments ask for must have survived olddefconfig.
+    && missing=0; for want in $(cd /cfg && grep -hE '^CONFIG_' $KERNEL_CONFIGS); do \
          grep -qxF "$want" .config || { echo "kernel config: $want did not take" >&2; missing=1; }; \
        done; [ "$missing" = 0 ]
 RUN make -j"$(nproc)" vmlinux >/dev/null && ls -la vmlinux
