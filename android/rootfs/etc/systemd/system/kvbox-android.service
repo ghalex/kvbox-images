@@ -1,7 +1,7 @@
 # Android in the box: the Redroid container, started at every boot and connected to the kvbox user's adb
-# as localhost:5555. Not a container restart policy: dockerd is socket-activated, so systemd owns the start.
+# as localhost:5600. Not a container restart policy: dockerd is socket-activated, so systemd owns the start.
 [Unit]
-Description=kvbox: Android (Redroid) on localhost:5555
+Description=kvbox: Android (Redroid) on localhost:5600
 Wants=network-online.target
 After=network-online.target docker.socket kvbox-agent.service
 Requires=docker.socket

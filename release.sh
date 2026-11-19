@@ -88,7 +88,7 @@ case "$image" in
           how="kvbox new cache --base redis" ;;
   garage) what="Garage guest image $version ($arch): the base image plus Garage $(docker run --rm kvbox-garage:local garage --version | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' | head -n 1) (the Garage project's own build, speaks the S3 protocol), one node on port 3900 with its data on a volume from GARAGE_DATA and its S3 region from GARAGE_REGION; scripts make buckets and their access keys. What kvbox's Object Storage runs on (kvbox #182)."
           how="kvbox bucket create uploads" ;;
-  android) what="Android guest image $version ($arch): the base image plus Java 17, Maven, the Android SDK (platform-tools, build-tools) and Appium $(docker run --rm kvbox-android:local appium --version) with the UiAutomator2 driver; Android runs as a Redroid container started at boot, adb on localhost:5555. Boots the android kernel (kernel-android, binder)."
+  android) what="Android guest image $version ($arch): the base image plus Java 17, Maven, the Android SDK (platform-tools, build-tools) and Appium $(docker run --rm kvbox-android:local appium --version) with the UiAutomator2 driver; Android runs as a Redroid container started at boot, adb on localhost:5600. Boots the android kernel (kernel-android, binder)."
           how="kvbox new phone --base android --size l" ;;
   kernel-android) what="Android guest kernel $version ($arch): Linux $(cat "$here/kernel-android/out/vmlinux.version") with kernel/kvbox.config plus kernel/android.config (binder), booted only by boxes of the android image."
           how="./install-server.sh --update" ;;

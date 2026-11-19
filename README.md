@@ -388,7 +388,8 @@ every login shell's PATH.
 Android is not emulated: `kvbox-android.service` runs a
 [Redroid](https://github.com/remote-android/redroid-doc) container (Android's
 own processes on the box's kernel, `redroid/redroid:14.0.0-latest` by default,
-pulled at the first boot), publishes its adb on `127.0.0.1:5555`, connects the
+pulled at the first boot), publishes its adb on `127.0.0.1:5600` (not 5555: adb also scans that
+port as an emulator, so it would list Android twice), connects the
 `kvbox` user's adb to it and waits until Android has booted. Android's `/data`
 (installed apps and their files) is `/var/lib/redroid`, kept across restarts.
 The box's variables `REDROID_IMAGE` and `REDROID_ARGS` (extra boot properties,
@@ -405,8 +406,8 @@ On a box whose kernel has no binder, `kvbox-android.service` fails and says so.
 
 ```
 kvbox new phone --base android --size l
-kvbox exec phone -- adb devices              # localhost:5555  device
-kvbox exec phone -- 'adb install app.apk'    # then point Appium at udid localhost:5555
+kvbox exec phone -- adb devices              # localhost:5600  device
+kvbox exec phone -- 'adb install app.apk'    # then point Appium at udid localhost:5600
 ```
 
 Give the box room: the Redroid image and Android's data live on its disk.

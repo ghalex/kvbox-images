@@ -1,6 +1,6 @@
 # kvbox android image: the base image plus what testing an Android app with Appium takes. Android itself
 # runs as a Redroid container (Android's own processes on the box's kernel, nothing emulated), pulled and
-# started at boot by kvbox-android.service, adb on 127.0.0.1:5555. Built by android/build.sh, which first
+# started at boot by kvbox-android.service, adb on 127.0.0.1:5600. Built by android/build.sh, which first
 # builds base/ as kvbox-base:local; never run as a container.
 #
 # Redroid needs binder in the kernel: image.json names the android kernel (kernel-android/), so only boxes

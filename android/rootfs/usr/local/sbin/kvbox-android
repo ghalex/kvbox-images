@@ -9,7 +9,9 @@ set -euo pipefail
 
 image="${REDROID_IMAGE:-redroid/redroid:14.0.0-latest}"
 name=redroid
-serial=localhost:5555
+# Not 5555: adb scans the odd ports 5555-5585 as emulators by itself, so Android would be listed twice
+# (localhost:5555 and emulator-5554) and a bare `adb shell` or Appium without a udid would refuse to pick.
+serial=localhost:5600
 
 as_kvbox_adb() { runuser -u kvbox -- adb "$@"; }
 
@@ -24,7 +26,7 @@ case "${1:-}" in
     fi
     mkdir -p /var/lib/redroid
     # shellcheck disable=SC2086  # REDROID_ARGS is a list of words on purpose
-    docker run -d --name "$name" --privileged -p 127.0.0.1:5555:5555 -v /var/lib/redroid:/data \
+    docker run -d --name "$name" --privileged -p 127.0.0.1:5600:5555 -v /var/lib/redroid:/data \
       "$image" androidboot.redroid_gpu_mode=guest ${REDROID_ARGS:-} >/dev/null
     echo "waiting for Android to boot"
     for _ in $(seq 1 120); do
