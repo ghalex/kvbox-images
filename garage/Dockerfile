@@ -4,8 +4,8 @@
 # Built by garage/build.sh, which first builds base/ as kvbox-base:local; never run as a container.
 #
 # Nothing listens until the box knows where its data goes: kvbox-garage-init.service takes GARAGE_DATA
-# (a directory on a volume), writes /etc/garage.toml, starts garage.service (S3 on 3900, plain HTTP:
-# kvbox's edge ends TLS) and makes this one node the whole cluster.
+# (a directory on a volume), writes /etc/garage.toml, starts garage.service (S3 on 3900, public buckets on
+# 3902, plain HTTP: kvbox's edge ends TLS) and makes this one node the whole cluster.
 FROM kvbox-base:local
 
 ENV DEBIAN_FRONTEND=noninteractive

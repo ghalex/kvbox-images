@@ -1,9 +1,9 @@
-# Once per box: the data directory from the box owner's GARAGE_DATA, Garage's configuration, and this
-# node made the whole cluster (kvbox #182). Not a oneshot, so waiting for the host's env push never
-# holds up the boot.
+# The data directory from the box owner's GARAGE_DATA, Garage's configuration, and this node made the
+# whole cluster (kvbox #182), once per box. Runs at every boot: with the marker there it only brings an
+# older configuration up to this image (#191), and exits. Not a oneshot, so waiting for the host's env
+# push never holds up the boot.
 [Unit]
-Description=kvbox: Garage's data directory, configuration and single-node layout (once)
-ConditionPathExists=!/var/lib/kvbox/garage-init.done
+Description=kvbox: Garage's data directory, configuration and single-node layout
 After=kvbox-agent.service kvbox-volumes.service
 
 [Service]

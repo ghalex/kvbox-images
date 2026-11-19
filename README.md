@@ -10,7 +10,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 and pgvector from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
-| `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
+| `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 (S3) and 3902 (public buckets, no signature) with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `android/` | `android-vX.Y.Z` | Everything in `base` plus Java 17, Maven, the Android SDK's command-line tools, platform-tools (adb) and build-tools, Appium with the UiAutomator2 driver; Android itself runs as a [Redroid](https://github.com/remote-android/redroid-doc) container started at boot. Boots the android kernel (see [The android image](#the-android-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
@@ -227,7 +227,7 @@ buckets and keys the control plane makes through the scripts below.
 
 Nothing listens until the box knows where its data goes: `garage.service` is
 skipped while `/etc/garage.toml` is missing. `kvbox-garage-init.service` runs
-at every boot until `/var/lib/kvbox/garage-init.done` exists: it waits for
+at every boot. Until `/var/lib/kvbox/garage-init.done` exists it waits for
 `/run/kvbox/env-ready`, reads `GARAGE_DATA` and `GARAGE_REGION` from
 `/etc/kvbox/env` (parsed, never sourced), then
 
@@ -238,11 +238,16 @@ at every boot until `/var/lib/kvbox/garage-init.done` exists: it waits for
   whose volume is detached has no `rpc_secret`, so the server refuses to start
   instead of starting empty on the box's own disk;
 - writes `/etc/garage.toml` (LMDB, both fsyncs on, `replication_factor = 1`,
-  RPC on localhost only, S3 on `[::]:3900`, region `GARAGE_REGION`: a name
+  RPC on localhost only, S3 on `[::]:3900`, the web endpoint on `[::]:3902`,
+  region `GARAGE_REGION`: a name
   such as `ro-west-1`, `us-east-1` when not sent, fixed from then on since every
   request is signed with it), starts the
   server and makes this node the whole cluster (zone `kvbox`, the volume's
   size as capacity) unless the volume already has a layout.
+
+Once the marker exists it only brings an older box's `/etc/garage.toml` up to
+this image (a box moved here by `kvbox vm update` gets the `[s3_web]` section,
+and the server restarts) and exits.
 
 There is no TLS and no admin API port: kvbox's edge ends TLS, and the scripts
 use `garage json-api`, which goes over the local RPC. Each script takes one
@@ -250,14 +255,24 @@ JSON object and prints one (the kvbox-agent `script` contract):
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{ready, accepting, version, storage: {usedBytes, totalBytes}, buckets: [{name, objects, bytes}]}` |
+| `status` | none | `{ready, accepting, version, storage: {usedBytes, totalBytes}, buckets: [{name, objects, bytes, public?}]}`, `public` the host names of a public bucket |
 | `bucket` | `{"op": "create", "name"}` | `{"id"}`; a taken name is an error |
 | `bucket` | `{"op": "rm", "name"}` | `{"removed", "keys"}`; refuses a bucket that holds objects, removes the keys that open it |
+| `bucket` | `{"op": "cors", "name", "origins"}` | `{"origins"}`; these origins may GET, HEAD and PUT and read `ETag` (the web app's uploads), and unfinished uploads are dropped after 2 days (garage v0.3.0+) |
+| `bucket` | `{"op": "public", "name", "on": true, "host", "index"?}` | `{"public", "hosts"}`; every object readable without a signature at `http://<host>:3902/<key>`, any origin may GET it, `index` (default `index.html`) for a path ending in `/`, nothing listed; `"on": false` undoes it (garage v0.3.0+) |
 | `key` | `{"op": "create", "bucket", "name", "readOnly"}` | `{"id", "secret"}`, the only time the secret leaves the box |
 | `key` | `{"op": "rm", "id"}` | `{"removed"}` |
 
 A key opens the one bucket it was made for (read, and write unless
-`readOnly`), never with the owner permission. Logs: `journalctl -u
+`readOnly`), never with the owner permission. CORS and lifecycle rules are S3
+settings only a key with the owner permission may write, so `cors` and `public`
+make one for the call and remove it after.
+
+A public bucket is served by Garage's web endpoint, which picks the bucket by
+the `Host` header among its names: `public` gives the bucket its host name
+(say `assets-alex.kvbox.app`) as a second name. kvbox bucket names never have a
+dot, so a name with one is always a host name. Garage has no per-object or
+per-prefix permission: public is the whole bucket. Logs: `journalctl -u
 kvbox-garage-init` and `journalctl -u garage`.
 
 ## The redis image

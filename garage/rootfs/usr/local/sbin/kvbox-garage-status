@@ -4,20 +4,22 @@
 #
 #   {"ready": true, "accepting": true, "version": "2.5.0",
 #    "storage": {"usedBytes": 2254857, "totalBytes": 10737418240},
-#    "buckets": [{"name": "uploads", "objects": 12, "bytes": 482113}]}
+#    "buckets": [{"name": "uploads", "objects": 12, "bytes": 482113},
+#                {"name": "assets", "objects": 3, "bytes": 9120, "public": ["assets-alex.kvbox.app"]}]}
 #
 # ready       kvbox-garage-init has finished: the server has its data directory and its layout
 # accepting   the server answers and can store (its cluster of one is healthy)
 # version     Garage's own version
 # storage     the filesystem holding the data directory: the volume
-# buckets     every bucket with how many objects it holds and their size; absent while not accepting
+# buckets     every bucket with how many objects it holds and their size, and `public`, the host names it
+#             answers at without a signature (`bucket` op `public`); absent while not accepting
 import os
 import re
 import subprocess
 import sys
 
 sys.path.insert(0, "/usr/local/lib/kvbox")
-from garage_api import ApiError, CONF, api, run  # noqa: E402
+from garage_api import ApiError, CONF, api, bucket_name, run, web_hosts  # noqa: E402
 
 MARKER = "/var/lib/kvbox/garage-init.done"
 
@@ -48,11 +50,15 @@ def storage(path):
 def buckets():
     out = []
     for b in api("ListBuckets") or []:
-        aliases = b.get("globalAliases") or []
-        if not aliases:
+        name = bucket_name(b)
+        if name is None:
             continue
         info = api("GetBucketInfo", {"id": b["id"]})
-        out.append({"name": aliases[0], "objects": info.get("objects", 0), "bytes": info.get("bytes", 0)})
+        bucket = {"name": name, "objects": info.get("objects", 0), "bytes": info.get("bytes", 0)}
+        hosts = web_hosts(info) if info.get("websiteAccess") else []
+        if hosts:
+            bucket["public"] = hosts
+        out.append(bucket)
     return sorted(out, key=lambda b: b["name"])
 
 

@@ -1,16 +1,90 @@
 #!/usr/bin/env python3
-# kvbox-garage-bucket (kvbox #182): make or remove a bucket. Named as "bucket" in /etc/kvbox/image.json.
+# kvbox-garage-bucket (kvbox #182, #128, #191): make or remove a bucket, let the web app upload to it, make
+# it public. Named as "bucket" in /etc/kvbox/image.json.
 #
 #   {"op": "create", "name": "uploads"}   ->  {"id": "<bucket id>"}
 #   {"op": "rm", "name": "uploads"}       ->  {"removed": true, "keys": ["GK…"]}
+#   {"op": "cors", "name": "uploads", "origins": ["https://app.kvbox.cloud"]}
+#        ->  {"origins": ["https://app.kvbox.cloud"]}
+#   {"op": "public", "name": "assets", "on": true, "host": "assets-alex.kvbox.app", "index": "index.html"}
+#        ->  {"public": true, "hosts": ["assets-alex.kvbox.app"]}
+#   {"op": "public", "name": "assets", "on": false}  ->  {"public": false, "hosts": []}
 #
 # create   refuses a name that is taken. rm refuses a bucket that still holds objects (emptying one can
 #          take longer than a script may run), removes the keys that open it, then the bucket; a bucket
 #          that is not there is `removed: false`, not an error, so a remove can be repeated.
+# cors     the browser rule for the web app: these origins may GET, HEAD and PUT (signed URLs) and read
+#          the ETag. Also has the storage drop an upload left unfinished for 2 days (a lifecycle rule).
+# public   on: every object of the bucket is readable without a signature at http://<host>:3902/<key>
+#          (Garage's web endpoint picks the bucket by the Host header: `host` becomes a second name of
+#          the bucket, with a dot, so never one of kvbox's bucket names), any origin may GET it (CORS),
+#          and `index` (required by Garage) is what a path ending in `/` serves. Nothing is ever listed.
+#          A bucket has one host: another one given replaces it. off: no host, no website, no such rule.
+# A bucket's CORS rules are all written here, so each op rewrites the whole set from what it knows.
+import re
 import sys
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 sys.path.insert(0, "/usr/local/lib/kvbox")
-from garage_api import api, bucket_named, fail, read_input, run, text  # noqa: E402
+from garage_api import api, bucket_named, fail, read_input, run, s3, s3_ok, text, web_hosts  # noqa: E402
+
+UNFINISHED_UPLOAD_DAYS = 2
+HOST_RE = r"^(?=.{4,63}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+INDEX_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+ORIGIN_RE = r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$"
+
+
+def found(name):
+    info = bucket_named(name)
+    if info is None:
+        fail(f"no bucket {name}")
+    return info
+
+
+def app_origins(info, name):
+    """The origins of the web app's rule, as the last `cors` op set them; [] when none was."""
+    status, body = s3(info["id"], name, "GET", "cors")
+    if status == 404:
+        return []
+    root = ET.fromstring(s3_ok((status, body), "reading the CORS rules"))
+    for rule in root.iter():
+        if rule.tag.split("}")[-1] != "CORSRule":
+            continue
+        methods = [m.text for m in rule if m.tag.split("}")[-1] == "AllowedMethod"]
+        if "PUT" in methods:
+            return [o.text for o in rule if o.tag.split("}")[-1] == "AllowedOrigin" and o.text]
+    return []
+
+
+def write_cors(info, name, origins, public):
+    def rule(origins, methods, expose):
+        return "<CORSRule>" + "".join(f"<AllowedOrigin>{escape(o)}</AllowedOrigin>" for o in origins) + "".join(f"<AllowedMethod>{m}</AllowedMethod>" for m in methods) + "<AllowedHeader>*</AllowedHeader>" + "".join(f"<ExposeHeader>{h}</ExposeHeader>" for h in expose) + "<MaxAgeSeconds>3600</MaxAgeSeconds></CORSRule>"
+
+    rules = []
+    if origins:
+        rules.append(rule(origins, ["GET", "HEAD", "PUT"], ["ETag"]))
+    if public:
+        rules.append(rule(["*"], ["GET", "HEAD"], ["ETag", "Content-Length", "Content-Type", "Last-Modified"]))
+    if not rules:
+        s3_ok(s3(info["id"], name, "DELETE", "cors"), "removing the CORS rules")
+        return
+    body = f'<?xml version="1.0" encoding="UTF-8"?><CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{"".join(rules)}</CORSConfiguration>'
+    s3_ok(s3(info["id"], name, "PUT", "cors", body.encode()), "writing the CORS rules")
+
+
+def drop_unfinished_uploads(info, name):
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?><LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        f"<Rule><ID>kvbox-unfinished-uploads</ID><Status>Enabled</Status><Filter><Prefix></Prefix></Filter>"
+        f"<AbortIncompleteMultipartUpload><DaysAfterInitiation>{UNFINISHED_UPLOAD_DAYS}</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule>"
+        "</LifecycleConfiguration>"
+    )
+    s3_ok(s3(info["id"], name, "PUT", "lifecycle", body.encode()), "writing the lifecycle rule")
+
+
+def matches(pattern, value):
+    return isinstance(value, str) and re.match(pattern, value) is not None
 
 
 def main():
@@ -32,6 +106,38 @@ def main():
             api("DeleteKey", {"id": key})
         api("DeleteBucket", {"id": info["id"]})
         return {"removed": True, "keys": keys}
+    if op == "cors":
+        origins = data.get("origins")
+        if not isinstance(origins, list) or not origins or not all(matches(ORIGIN_RE, o) for o in origins):
+            fail('"origins" must be a list of origins like https://app.example.com')
+        info = found(name)
+        write_cors(info, name, origins, info.get("websiteAccess") is True)
+        drop_unfinished_uploads(info, name)
+        return {"origins": origins}
+    if op == "public":
+        on = data.get("on")
+        if not isinstance(on, bool):
+            fail('"on" must be true or false')
+        info = found(name)
+        if on:
+            host = data.get("host")
+            if not matches(HOST_RE, host):
+                fail(f'"host" must be a host name of at most 63 characters with a dot, like {name}-alex.kvbox.app')
+            index = data.get("index", "index.html")
+            if not matches(INDEX_RE, index):
+                fail('"index" must be a file name like index.html')
+            other = bucket_named(host)
+            if other is not None and other["id"] != info["id"]:
+                fail(f"{host} is already the name of another bucket")
+            if host not in web_hosts(info):
+                api("AddBucketAlias", {"bucketId": info["id"], "globalAlias": host})
+        for old in web_hosts(info):
+            if not on or old != host:
+                api("RemoveBucketAlias", {"bucketId": info["id"], "globalAlias": old})
+        website = {"enabled": True, "indexDocument": index, "errorDocument": None} if on else {"enabled": False}
+        api("UpdateBucket", {"id": info["id"], "body": {"websiteAccess": website}})
+        write_cors(info, name, app_origins(info, name), on)
+        return {"public": on, "hosts": [host] if on else []}
     fail(f'unknown op "{op}"')
 
 

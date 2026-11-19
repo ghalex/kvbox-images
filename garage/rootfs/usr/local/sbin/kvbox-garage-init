@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kvbox-garage-init (kvbox #182): set Garage up on the box's volume, once per box. Run by
-# kvbox-garage-init.service, which is skipped once the marker exists.
+# kvbox-garage-init.service at every boot; once the marker exists it only brings an older box's
+# /etc/garage.toml up to this image (a box moved here by `kvbox vm update`: the web endpoint, #191).
 #
 # The host sends GARAGE_DATA (a directory on a volume, /mnt/<volume>[/…]) and GARAGE_REGION (the S3
 # region the storage answers to, `ro-west-1`; `us-east-1` when not sent) through kvbox-agent's "env"
@@ -28,7 +29,24 @@ WAIT_SERVER=120   # seconds for the server to answer
 
 log() { echo "kvbox-garage-init: $*" >&2; }
 
-[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+# Garage's web endpoint (#191): a public bucket's objects without a signature, the bucket picked by the
+# Host header among its names (kvbox gives a public bucket its host name as a second one). Plain HTTP:
+# kvbox's edge ends TLS. root_domain is required by Garage and matches no name the edge sends.
+WEB_SECTION='[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.kvbox.invalid"'
+
+if [[ -e "$MARKER" ]]; then
+  if [[ -f "$CONF" ]] && ! grep -q '^\[s3_web\]' "$CONF"; then
+    { cat "$CONF"; printf '\n%s\n' "$WEB_SECTION"; } > "$CONF.tmp"
+    chmod 0644 "$CONF.tmp"
+    mv "$CONF.tmp" "$CONF"
+    systemctl restart garage.service
+    log "added the web endpoint (port 3902) to $CONF"
+  fi
+  log "already done ($MARKER)"
+  exit 0
+fi
 
 for ((i = 0; i < WAIT_ENV; i++)); do
   [[ -e "$READY" ]] && break
@@ -120,6 +138,8 @@ rpc_secret_file = "$DATA/rpc_secret"
 [s3_api]
 s3_region = "$REGION"
 api_bind_addr = "[::]:3900"
+
+$WEB_SECTION
 TOML
 chmod 0644 "$tmp"
 mv "$tmp" "$CONF"
@@ -150,4 +170,4 @@ fi
 
 install -d -m 0755 "$(dirname "$MARKER")"
 : > "$MARKER"
-log "done: Garage answers on port 3900, data in $DATA"
+log "done: Garage answers on port 3900 (S3) and 3902 (public buckets), data in $DATA"
