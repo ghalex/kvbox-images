@@ -15,16 +15,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 LTS (node + npm) from NodeSource, Docker Engine from Docker's own repository:
-# Ubuntu's apt ships old versions of both.
+# Node.js 22 LTS (node + npm) from NodeSource, Docker Engine from Docker's own repository, GitHub's CLI
+# from GitHub's: Ubuntu's apt ships old versions of all three.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
+    # GitHub's CLI from GitHub's own repository (kvbox #205: `gh` works with the connected account).
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends \
       nodejs \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+      gh \
     && rm -rf /var/lib/apt/lists/* \
     # A box is disposable: let `pip install` work without a venv (Ubuntu's PEP 668 guard off).
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
@@ -89,6 +94,11 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     && install -d -m 0755 /etc/kvbox \
     && systemctl disable nginx.service \
     && chmod 0755 /usr/local/sbin/kvbox-init /usr/local/sbin/kvbox-agent /usr/local/sbin/kvbox-volumes /sbin/overlay-init \
+    # Integrations (kvbox #205): the credential client, git's helper for github.com, and a gh that uses it
+    # (ahead of /usr/bin/gh on PATH).
+    && chmod 0755 /usr/local/bin/kvbox-credential /usr/local/bin/gh /usr/local/lib/kvbox/git-credential-kvbox \
+    && chmod 0644 /etc/gitconfig \
+    && test -x /usr/bin/gh \
     # Mount points overlay-init needs: the box disk, and where the base image ends up after the
     # overlay becomes the root.
     && mkdir -p /overlay /rom \

@@ -7,7 +7,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 
 | Image | Release tag | Contents |
 |---|---|---|
-| `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
+| `base/` | `base-vX.Y.Z` | Ubuntu 24.04, systemd, sshd (key-only), user `kvbox` with passwordless sudo, curl, git, Python 3, uv (`uv`, `uvx`), Node.js 22 (npm), Docker Engine, GitHub's CLI (`gh`), nginx (off; `kvbox deploy` turns it on to serve `/srv/app/dist`), Claude Code CLI, [agent-browser](https://agent-browser.dev) with a headless Chrome (Chrome for Testing in `/opt/chrome`, also `chromium` on PATH; `AGENT_BROWSER_EXECUTABLE_PATH` points at it in every SSH session) |
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 and pgvector from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 (S3) and 3902 (public buckets, no signature) with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
@@ -15,6 +15,36 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `android/` | `android-vX.Y.Z` | Everything in `base` plus Java 17, Maven, the Android SDK's command-line tools, platform-tools (adb) and build-tools, Appium with the UiAutomator2 driver; Android itself runs as a [Redroid](https://github.com/remote-android/redroid-doc) container started at boot. Boots the android kernel (see [The android image](#the-android-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
 | `kernel-android/` | `kernel-android-vX.Y.Z-N` | The same kernel plus `kernel/android.config` (binder); booted only by boxes of an image that asks for it |
+
+## Integrations
+
+An integration (kvbox issue #205) is an account the box's owner connected once
+in the kvbox web app, GitHub today, and turned on for a box
+(`kvbox vm set <box> --integration github`). Nothing of it is written into the
+box: a program asks the host each time it needs the credential, so a disconnect
+works at once and a snapshot, a fork or a backup carries no secret. From base
+v0.17.0:
+
+- `kvbox-credential <integration>` asks the host over vsock (host CID 2, port
+  53, the one direction where the box opens the connection; one JSON line each
+  way) and prints the answer: `{"ok": true, "kind", "token", "identity"?}` or
+  `{"ok": false, "code", "message"}` with `off`, `not-connected`,
+  `needs-reconnect` or `unavailable` (exit 0, 3, 4, 5, 6). `--token` prints the
+  token alone. Any user in the box may ask.
+- git: `/etc/gitconfig` names `/usr/local/lib/kvbox/git-credential-kvbox` as
+  the credential helper for `https://github.com`. It answers with the token, and
+  stays silent when there is none, so the user's own helpers and logins work as
+  in any box. While GitHub is on for the box, kvbox-agent keeps
+  `/etc/kvbox/gitconfig` (included by `/etc/gitconfig`): `git@github.com:` and
+  `ssh://git@github.com/` URLs go over HTTPS, and the connected account's name
+  and email are who commits; a user's own `~/.gitconfig` wins over both.
+- `gh`: `/usr/local/bin/gh` is ahead of GitHub's CLI (`/usr/bin/gh`, from
+  GitHub's apt repository) on PATH. With no `GH_TOKEN` or `GITHUB_TOKEN` set and
+  a token answered, it runs the real one with `GH_TOKEN`; otherwise untouched,
+  so `gh auth login` works too.
+
+github.com only. The host side is the kvbox-server release after 0.6.12; under an older
+one every answer is `unavailable` and the box behaves as it did before.
 
 ## Why our own kernel
 
@@ -96,6 +126,11 @@ with `data` in base64 (a command may print bytes that are not UTF-8, and a cut
 may fall inside a character) and `size` the stream's whole length, so the asker
 knows what it did not get. No file is size 0, never an error. A run from base
 v0.15.x has only the `.log`: it reads as stdout, with stderr empty.
+
+`{"op": "integrations", "list": ["github"], "identity": {"name", "email"}}`
+(base v0.17.0 and later, kvbox issue #205) is the list of integrations turned
+on for the box, sent whenever it changes and each time the box comes up; it
+never holds a credential (see [Integrations](#integrations)).
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot

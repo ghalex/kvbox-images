@@ -1,0 +1,14 @@
+#!/bin/sh
+# gh, with the box owner's connected GitHub account (kvbox issue #205). Ahead of the real gh on PATH.
+# With no GH_TOKEN or GITHUB_TOKEN set and GitHub turned on for this box, the real gh runs with the
+# token the host hands out (kvbox-credential; nothing is stored in the box). In every other case it
+# runs untouched, so `gh auth login` inside a box works as anywhere.
+real=/usr/bin/gh
+if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}" ]; then
+  token="$(/usr/local/bin/kvbox-credential --token github 2>/dev/null)" || token=""
+  if [ -n "$token" ]; then
+    GH_TOKEN="$token"
+    export GH_TOKEN
+  fi
+fi
+exec "$real" "$@"

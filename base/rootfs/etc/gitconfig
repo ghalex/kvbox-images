@@ -1,0 +1,12 @@
+# System git config of a kvbox box (kvbox issue #205). A user's own ~/.gitconfig wins over all of it.
+#
+# The helper hands git the box owner's connected GitHub account, when GitHub is turned on for this
+# box (kvbox vm set <box> --integration github); otherwise it stays silent and git behaves as usual.
+[credential "https://github.com"]
+	helper = /usr/local/lib/kvbox/git-credential-kvbox
+[credential "https://gist.github.com"]
+	helper = /usr/local/lib/kvbox/git-credential-kvbox
+# Written by kvbox-agent only while GitHub is on for the box, removed when it is turned off: SSH-style
+# GitHub URLs go over HTTPS, and who commits is the connected account. A missing file is skipped.
+[include]
+	path = /etc/kvbox/gitconfig

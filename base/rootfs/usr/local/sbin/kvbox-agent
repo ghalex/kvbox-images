@@ -26,6 +26,8 @@
 #                                       -> {"ok": true, "state": "exited", "exitCode": 0, "durationMs": 34}
 #   {"op": "runOutput", "id": "cr_8f3a", "stream": "stdout", "offset": 0, "limit": 1048576}
 #                                       -> {"ok": true, "size": 12, "offset": 0, "data": "aGVsbG8gd29ybGQK"}
+#   {"op": "integrations", "list": ["github"], "identity": {"name": "Ada", "email": "ada@example.com"}}
+#                                       -> {"ok": true, "list": 1}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -77,6 +79,14 @@
 # that never wrote to that stream) is size 0, never an error. A run started by an agent from before
 # this op (base v0.15.x) has a single <id>.log with both streams together: it is read as stdout, and
 # its stderr is empty.
+# "integrations" is the list of integrations turned on for the box (kvbox issue #205: accounts its owner
+# connected in the web app, GitHub today), sent whenever it changes and each time the box comes up; the
+# whole list replaces the previous one. It never holds a credential: programs in the box ask the host
+# for one each time (kvbox-credential). The list is kept in /etc/kvbox/integrations, one name a line.
+# While "github" is in it, /etc/kvbox/gitconfig (included by /etc/gitconfig) sends SSH-style GitHub
+# URLs over HTTPS, where the credential helper answers, and sets who commits from "identity" (the
+# connected account; absent for a connection that names nobody); when it is not, that file is removed,
+# so a box that uses its own SSH key with GitHub is left alone.
 # Errors come back as {"ok": false, "error"}.
 import base64
 import glob
@@ -249,6 +259,43 @@ def set_env(pairs):
         if r.returncode not in (0, 5):
             raise subprocess.CalledProcessError(r.returncode, r.args, stderr=r.stderr)
     return len(pairs), changed
+
+
+INTEGRATIONS_FILE = "/etc/kvbox/integrations"
+GIT_INCLUDE = "/etc/kvbox/gitconfig"
+INTEGRATION_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+def git_quoted(value):
+    # A git config value in double quotes: one line, `\` and `"` escaped.
+    return '"' + re.sub(r"[\r\n\0]", " ", value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_integrations(names, identity):
+    if not isinstance(names, list) or not all(isinstance(n, str) and INTEGRATION_NAME.match(n) for n in names):
+        raise ValueError("integrations: 'list' must be a list of names")
+    if identity is not None and not (
+        isinstance(identity, dict) and isinstance(identity.get("name"), str) and isinstance(identity.get("email"), str)
+    ):
+        raise ValueError("integrations: 'identity' must be {name, email}")
+    os.makedirs(os.path.dirname(INTEGRATIONS_FILE), mode=0o755, exist_ok=True)
+    write_atomic(INTEGRATIONS_FILE, "".join(f"{n}\n" for n in names), 0o644)
+    if "github" in names:
+        text = (
+            "# Written by kvbox-agent while GitHub is turned on for this box; do not edit, it is replaced.\n"
+            '[url "https://github.com/"]\n'
+            "\tinsteadOf = git@github.com:\n"
+            "\tinsteadOf = ssh://git@github.com/\n"
+        )
+        if identity is not None and identity["name"] and identity["email"]:
+            text += f"[user]\n\tname = {git_quoted(identity['name'])}\n\temail = {git_quoted(identity['email'])}\n"
+        write_atomic(GIT_INCLUDE, text, 0o644)
+    else:
+        try:
+            os.remove(GIT_INCLUDE)
+        except FileNotFoundError:
+            pass
+    return len(names)
 
 
 VOLUME_DEV = re.compile(r"^/dev/vd[c-z]+$")  # vda is the base image, vdb the box's own disk
@@ -455,6 +502,10 @@ def handle(req):
         n, changed = set_env(req.get("vars"))
         log(f"environment: {n} variables{', changed' if changed else ''}")
         return {"ok": True, "vars": n, "changed": changed}
+    if op == "integrations":
+        n = set_integrations(req.get("list"), req.get("identity"))
+        log(f"integrations: {', '.join(req['list']) if n else 'none'}")
+        return {"ok": True, "list": n}
     if op == "idle":
         return {"ok": True, "idle": idle(req.get("path"))}
     if op == "script":
