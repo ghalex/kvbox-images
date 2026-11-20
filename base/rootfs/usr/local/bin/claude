@@ -1,0 +1,21 @@
+#!/bin/sh
+# claude, with the box owner's connected Claude Code account (kvbox issue #205). The real claude is the
+# kvbox user's, installed and kept up to date by its own installer in ~/.local/bin; this wrapper is ahead
+# of it on PATH (the image's ~/.profile puts ~/.local/bin last), so its self-updates never replace it.
+# With no credential variable set and Claude Code turned on for this box, the real claude runs with the
+# credential the host hands out (kvbox-credential; nothing is stored in the box): a `claude setup-token`
+# token as CLAUDE_CODE_OAUTH_TOKEN, an API key as ANTHROPIC_API_KEY. In every other case it runs
+# untouched, so a login made inside the box works as anywhere.
+real=/home/kvbox/.local/bin/claude
+if [ ! -x "$real" ]; then
+  echo "claude: not installed for the kvbox user ($real); reinstall it with: curl -fsSL https://claude.ai/install.sh | bash" >&2
+  exit 127
+fi
+if [ -z "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  token="$(/usr/local/bin/kvbox-credential --token claude 2>/dev/null)" || token=""
+  case "$token" in
+    sk-ant-oat*) CLAUDE_CODE_OAUTH_TOKEN="$token"; export CLAUDE_CODE_OAUTH_TOKEN ;;
+    ?*) ANTHROPIC_API_KEY="$token"; export ANTHROPIC_API_KEY ;;
+  esac
+fi
+exec "$real" "$@"

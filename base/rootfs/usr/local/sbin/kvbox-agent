@@ -27,7 +27,7 @@
 #   {"op": "runOutput", "id": "cr_8f3a", "stream": "stdout", "offset": 0, "limit": 1048576}
 #                                       -> {"ok": true, "size": 12, "offset": 0, "data": "aGVsbG8gd29ybGQK"}
 #   {"op": "integrations", "list": ["github"], "identity": {"name": "Ada", "email": "ada@example.com"}}
-#                                       -> {"ok": true, "list": 1}
+#                                       -> {"ok": true, "list": 1, "known": ["github", "claude"]}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -86,7 +86,11 @@
 # While "github" is in it, /etc/kvbox/gitconfig (included by /etc/gitconfig) sends SSH-style GitHub
 # URLs over HTTPS, where the credential helper answers, and sets who commits from "identity" (the
 # connected account; absent for a connection that names nobody); when it is not, that file is removed,
-# so a box that uses its own SSH key with GitHub is left alone.
+# so a box that uses its own SSH key with GitHub is left alone. While "claude" is in it, the kvbox user's
+# ~/.claude.json is marked as onboarded, so the `claude` wrapper's first start goes straight in instead of
+# asking how to log in (no secret is written: the wrapper asks for the credential each time). The answer's
+# "known" lists the integrations this image can use (base v0.18.0 and later; v0.17.0 answered without it
+# and knew github alone), so the host refuses one it cannot.
 # Errors come back as {"ok": false, "error"}.
 import base64
 import glob
@@ -264,6 +268,25 @@ def set_env(pairs):
 INTEGRATIONS_FILE = "/etc/kvbox/integrations"
 GIT_INCLUDE = "/etc/kvbox/gitconfig"
 INTEGRATION_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+KNOWN_INTEGRATIONS = ["github", "claude"]
+CLAUDE_STATE = "/home/kvbox/.claude.json"
+
+
+def mark_claude_onboarded():
+    # Claude Code's own state file: only the onboarding flag is set, everything else in it is kept.
+    # A file that is not JSON is the user's business and is left alone.
+    user = pwd.getpwnam(SSH_USER)
+    try:
+        with open(CLAUDE_STATE) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        state = {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(state, dict) or state.get("hasCompletedOnboarding") is True:
+        return
+    state["hasCompletedOnboarding"] = True
+    write_atomic(CLAUDE_STATE, json.dumps(state, indent=2) + "\n", 0o600, user.pw_uid, user.pw_gid)
 
 
 def git_quoted(value):
@@ -295,6 +318,8 @@ def set_integrations(names, identity):
             os.remove(GIT_INCLUDE)
         except FileNotFoundError:
             pass
+    if "claude" in names:
+        mark_claude_onboarded()
     return len(names)
 
 
@@ -505,7 +530,7 @@ def handle(req):
     if op == "integrations":
         n = set_integrations(req.get("list"), req.get("identity"))
         log(f"integrations: {', '.join(req['list']) if n else 'none'}")
-        return {"ok": True, "list": n}
+        return {"ok": True, "list": n, "known": KNOWN_INTEGRATIONS}
     if op == "idle":
         return {"ok": True, "idle": idle(req.get("path"))}
     if op == "script":

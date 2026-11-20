@@ -19,7 +19,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 ## Integrations
 
 An integration (kvbox issue #205) is an account the box's owner connected once
-in the kvbox web app, GitHub today, and turned on for a box
+in the kvbox web app (GitHub, Claude Code) and turned on for a box
 (`kvbox vm set <box> --integration github`). Nothing of it is written into the
 box: a program asks the host each time it needs the credential, so a disconnect
 works at once and a snapshot, a fork or a backup carries no secret. From base
@@ -42,8 +42,17 @@ v0.17.0:
   GitHub's apt repository) on PATH. With no `GH_TOKEN` or `GITHUB_TOKEN` set and
   a token answered, it runs the real one with `GH_TOKEN`; otherwise untouched,
   so `gh auth login` works too.
+- `claude` (base v0.18.0): `/usr/local/bin/claude` is a wrapper ahead of the
+  real one (`~/.local/bin/claude`, which the image's `~/.profile` puts last on
+  PATH, so Claude Code's self-updates never replace the wrapper). With no
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` set and a credential
+  answered, it runs the real one with the `claude setup-token` token as
+  `CLAUDE_CODE_OAUTH_TOKEN` or the API key as `ANTHROPIC_API_KEY`; otherwise
+  untouched, so a login inside the box works too. While Claude Code is on,
+  kvbox-agent marks `~/.claude.json` as onboarded so the first start goes
+  straight in.
 
-github.com only. The host side is the kvbox-server release after 0.6.12; under an older
+GitHub is github.com only. The host side is the kvbox-server release after 0.6.12; under an older
 one every answer is `unavailable` and the box behaves as it did before.
 
 ## Why our own kernel
@@ -130,7 +139,9 @@ v0.15.x has only the `.log`: it reads as stdout, with stderr empty.
 `{"op": "integrations", "list": ["github"], "identity": {"name", "email"}}`
 (base v0.17.0 and later, kvbox issue #205) is the list of integrations turned
 on for the box, sent whenever it changes and each time the box comes up; it
-never holds a credential (see [Integrations](#integrations)).
+never holds a credential (see [Integrations](#integrations)). From base
+v0.18.0 the answer's `known` lists the integrations the image can use, so the
+host refuses one it cannot.
 
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot

@@ -78,8 +78,11 @@ RUN HOME=/home/kvbox bash -c 'curl -fsSL https://claude.ai/install.sh | bash' \
 RUN HOME=/home/kvbox UV_NO_MODIFY_PATH=1 bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' \
     && test -x /home/kvbox/.local/bin/uv && test -x /home/kvbox/.local/bin/uvx
 USER root
-# Reachable from non-interactive sessions too (`kvbox connect box -- claude ...`).
-RUN ln -s /home/kvbox/.local/bin/claude /usr/local/bin/claude \
+# Reachable from non-interactive sessions too (`kvbox connect box -- claude ...`). claude itself is reached
+# through rootfs/usr/local/bin/claude, the integrations wrapper (kvbox #205), which must come first on PATH:
+# Ubuntu's ~/.profile puts ~/.local/bin ahead of everything, so the image's puts it last instead.
+RUN sed -i 's|PATH="$HOME/.local/bin:$PATH"|PATH="$PATH:$HOME/.local/bin"|' /home/kvbox/.profile \
+    && grep -q 'PATH="$PATH:$HOME/.local/bin"' /home/kvbox/.profile \
     && ln -s /home/kvbox/.local/bin/uv /usr/local/bin/uv \
     && ln -s /home/kvbox/.local/bin/uvx /usr/local/bin/uvx
 
@@ -94,9 +97,9 @@ RUN chmod 0440 /etc/sudoers.d/kvbox \
     && install -d -m 0755 /etc/kvbox \
     && systemctl disable nginx.service \
     && chmod 0755 /usr/local/sbin/kvbox-init /usr/local/sbin/kvbox-agent /usr/local/sbin/kvbox-volumes /sbin/overlay-init \
-    # Integrations (kvbox #205): the credential client, git's helper for github.com, and a gh that uses it
-    # (ahead of /usr/bin/gh on PATH).
-    && chmod 0755 /usr/local/bin/kvbox-credential /usr/local/bin/gh /usr/local/lib/kvbox/git-credential-kvbox \
+    # Integrations (kvbox #205): the credential client, git's helper for github.com, a gh that uses it
+    # (ahead of /usr/bin/gh on PATH) and a claude that does (ahead of ~/.local/bin/claude).
+    && chmod 0755 /usr/local/bin/kvbox-credential /usr/local/bin/gh /usr/local/bin/claude /usr/local/lib/kvbox/git-credential-kvbox \
     && chmod 0644 /etc/gitconfig \
     && test -x /usr/bin/gh \
     # Mount points overlay-init needs: the box disk, and where the base image ends up after the
