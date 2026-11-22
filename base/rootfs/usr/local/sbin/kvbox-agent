@@ -28,6 +28,9 @@
 #                                       -> {"ok": true, "size": 12, "offset": 0, "data": "aGVsbG8gd29ybGQK"}
 #   {"op": "integrations", "list": ["github"], "identity": {"name": "Ada", "email": "ada@example.com"}}
 #                                       -> {"ok": true, "list": 1, "known": ["github", "claude"]}
+#   {"op": "freeze", "box": true, "volumes": ["data"], "thawAfterSec": 30}
+#                                       -> {"ok": true, "frozen": ["/rom/overlay", "/mnt/data"]}
+#   {"op": "thaw"}                      -> {"ok": true, "thawed": ["/rom/overlay", "/mnt/data"]}
 #
 # "identity" is what a box restored from a snapshot gets: it wakes up believing it is still the
 # box the snapshot was taken from (same name, IP, MAC and clock in memory), and the host tells it
@@ -53,7 +56,7 @@
 # `kvbox vm set --idle-check`) and sends its path; it is run (as root, at most IDLE_TIMEOUT seconds)
 # and exit 0 means idle, anything else busy. The host asks once a minute, only for a box that has a
 # check, and hibernates it after its auto-hibernate time of idle answers in a row. Each connection has its
-# own thread so a slow script never holds up another request; every op but "idle", "script", "runStatus" and "runOutput" still runs one at a time.
+# own thread so a slow script never holds up another request; every op but "idle", "script", "runStatus", "runOutput", "freeze" and "thaw" still runs one at a time.
 # "script" is how the host asks an image something only the image knows (kvbox issue #173: a managed
 # Postgres's status, a password reset). The image names its scripts in /etc/kvbox/image.json
 # ("scripts"), the host sends the path; it is run as root with "input" (any JSON, null when absent) as
@@ -91,8 +94,18 @@
 # asking how to log in (no secret is written: the wrapper asks for the credential each time). The answer's
 # "known" lists the integrations this image can use (base v0.18.0 and later; v0.17.0 answered without it
 # and knew github alone), so the host refuses one it cannot.
+# "freeze" and "thaw" make a backup's copy of a disk clean (kvbox issue #211). The host copies a disk's
+# file from outside the box, so writes the guest still holds in memory would be missing from the copy,
+# as after a power cut. "freeze" writes them out and blocks new writes (FIFREEZE, what fsfreeze -f does)
+# on the filesystem of the box's own disk ("box": the kvbox.overlay= device, mounted at /rom/overlay) and
+# of each named volume (the disk labelled kv:<name>); one that is not mounted is skipped. Programs keep
+# running: only their writes wait. "thaw" lets them go on (FITHAW) and answers what it thawed. The agent
+# thaws by itself "thawAfterSec" (at most FREEZE_MAX_SEC) after a freeze that no "thaw" followed, so a host
+# that died in between never leaves the box's writes blocked. One freeze at a time; nothing is written to
+# the disks and nothing is logged while they are frozen (the journal lives on the box's disk).
 # Errors come back as {"ok": false, "error"}.
 import base64
+import fcntl
 import glob
 import json
 import os
@@ -498,7 +511,119 @@ def run(run_id, command, timeout_sec):
     return True
 
 
-UNLOCKED_OPS = ("idle", "script", "runStatus", "runOutput")  # they run something that may be slow, or read up to a MiB
+FIFREEZE = 0xC0045877  # _IOWR('X', 119, int)
+FITHAW = 0xC0045878  # _IOWR('X', 120, int)
+FREEZE_DEFAULT_SEC = 30
+FREEZE_MAX_SEC = 120
+FREEZE_LOCK = threading.Lock()
+frozen = {"mounts": [], "fds": [], "timer": None}  # under FREEZE_LOCK
+
+
+def box_disk():
+    with open("/proc/cmdline") as f:
+        for arg in f.read().split():
+            if arg.startswith("kvbox.overlay="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def volume_disk(name):
+    if not isinstance(name, str) or not name or "/" in name or name.startswith("."):
+        raise ValueError("freeze: 'volumes' must be a list of volume names")
+    r = subprocess.run(["blkid", "-L", f"kv:{name}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return r.stdout.strip() or None
+
+
+def mount_of(dev):
+    """Where a disk is mounted (its first mount: the others are binds of it), or None."""
+    if dev is None:
+        return None
+    real = os.path.realpath(dev)
+    with open("/proc/mounts") as f:
+        for line in f:
+            source, target = line.split()[:2]
+            if source.startswith("/dev/") and os.path.realpath(source) == real:
+                return target.replace("\\040", " ")
+    return None
+
+
+def thaw_frozen():
+    """Thaws what this agent froze; caller holds FREEZE_LOCK. Every mount is tried, the first error raised."""
+    if frozen["timer"] is not None:
+        frozen["timer"].cancel()
+    mounts, fds = frozen["mounts"], frozen["fds"]
+    frozen.update(mounts=[], fds=[], timer=None)
+    failed = None
+    for fd in reversed(fds):
+        try:
+            fcntl.ioctl(fd, FITHAW)
+        except OSError as e:
+            failed = failed or e
+        finally:
+            os.close(fd)
+    if failed:
+        raise failed
+    return mounts
+
+
+def thaw_by_itself():
+    with FREEZE_LOCK:
+        if not frozen["mounts"]:
+            return
+        try:
+            mounts = thaw_frozen()
+            log(f"thawed {', '.join(mounts)} by itself: no thaw came")
+        except OSError as e:
+            log(f"thaw by itself failed: {e}")
+
+
+def freeze(box, volumes, after):
+    if volumes is None:
+        volumes = []
+    if not isinstance(volumes, list):
+        raise ValueError("freeze: 'volumes' must be a list of volume names")
+    if after is None:
+        after = FREEZE_DEFAULT_SEC
+    if not isinstance(after, int) or isinstance(after, bool) or not 1 <= after <= FREEZE_MAX_SEC:
+        raise ValueError(f"freeze: 'thawAfterSec' must be a whole number from 1 to {FREEZE_MAX_SEC}")
+    # Everything is looked up before the first freeze: nothing may run on a frozen disk.
+    targets = []
+    for dev in ([box_disk()] if box is True else []) + [volume_disk(v) for v in volumes]:
+        target = mount_of(dev)
+        if target is not None and target not in targets:
+            targets.append(target)
+    with FREEZE_LOCK:
+        if frozen["mounts"]:
+            raise ValueError(f"already frozen: {', '.join(frozen['mounts'])}")
+        try:
+            for target in targets:
+                fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    fcntl.ioctl(fd, FIFREEZE)
+                except OSError:
+                    os.close(fd)
+                    raise
+                frozen["mounts"].append(target)
+                frozen["fds"].append(fd)
+        except OSError:
+            thaw_frozen()
+            raise
+        if targets:
+            timer = threading.Timer(after, thaw_by_itself)
+            timer.daemon = True
+            frozen["timer"] = timer
+            timer.start()
+        return list(targets)
+
+
+def thaw():
+    with FREEZE_LOCK:
+        return thaw_frozen()
+
+
+# "idle", "script", "runStatus" and "runOutput" run something that may be slow, or read up to a MiB; "freeze"
+# and "thaw" must never wait behind an op that is itself waiting on a frozen disk.
+UNLOCKED_OPS = ("idle", "script", "runStatus", "runOutput", "freeze", "thaw")
 
 
 def handle(req):
@@ -544,6 +669,14 @@ def handle(req):
         return {"ok": True, **run_status(req.get("id"))}
     if op == "runOutput":
         return {"ok": True, **run_output(req.get("id"), req.get("stream"), req.get("offset", 0), req.get("limit", RUN_OUTPUT_MAX))}
+    if op == "freeze":
+        # not logged: the journal is on the frozen disk
+        return {"ok": True, "frozen": freeze(req.get("box"), req.get("volumes"), req.get("thawAfterSec"))}
+    if op == "thaw":
+        thawed = thaw()
+        if thawed:
+            log(f"froze and thawed {', '.join(thawed)} for a backup")
+        return {"ok": True, "thawed": thawed}
     raise ValueError(f"unknown op {op!r}")
 
 
