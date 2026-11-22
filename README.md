@@ -143,6 +143,19 @@ never holds a credential (see [Integrations](#integrations)). From base
 v0.18.0 the answer's `known` lists the integrations the image can use, so the
 host refuses one it cannot.
 
+`{"op": "freeze", "box": true, "volumes": ["data"], "thawAfterSec": 30}` and
+`{"op": "thaw"}` (base v0.19.0 and later, kvbox issue #211) make a backup's
+copy of a disk clean. The host copies a disk's file from outside the box, so
+writes the guest still holds in memory would be missing, as after a power cut.
+`freeze` writes them out and blocks new writes (`FIFREEZE`, what `fsfreeze -f`
+does) on the box's own disk (`box`: the `kvbox.overlay=` device, mounted at
+`/rom/overlay`) and on each named volume (the disk labelled `kv:<name>`); a
+disk that is not mounted is skipped. It answers the mount points it froze.
+Programs keep running; only their writes wait. `thaw` lets them go on and
+answers what it thawed. If no `thaw` comes within `thawAfterSec` (default 30,
+at most 120), the agent thaws by itself, so a host that died in between never
+leaves the box's writes blocked. One freeze at a time.
+
 A volume (kvbox issue #52) is an extra disk the host attaches, `/dev/vdc` and
 up, formatted ext4 on the host with the label `kv:<name>` (an ext4 label is 16 bytes). At boot
 `kvbox-volumes.service` (base v0.9.1 and later) mounts each labelled disk at
