@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+# kvbox-k3s-drain (kvbox #214): take a node out of the cluster before its box is removed. Named as
+# "drain" in /etc/kvbox/image.json; the host runs it on the cluster's server through kvbox-agent's
+# "script" with the input on stdin and passes the JSON on.
+#
+# A drain waits for pods to stop and can take minutes, longer than a script may run, so it works in
+# the background (a transient systemd unit, kvbox-k3s-drain-<node>) and the caller asks again:
+#
+#   {"op": "start", "node": "prod-a1"}   ->   {"node": "prod-a1", "state": "draining"}
+#   {"op": "state", "node": "prod-a1"}   ->   {"node": "prod-a1", "state": "draining" | "done" | "failed" | "idle",
+#                                              "error": "…"}   (error only with failed)
+#
+# start   cordons the node, moves its pods away (DaemonSet pods stay, emptyDir data goes, a pod no
+#         controller owns is deleted) and then deletes the node object. A node the cluster does not
+#         know is "done" at once; one already draining stays "draining"; after "failed", start again.
+# state   done: the node object is gone. idle: the node is there and nothing drains it.
+#
+# What a node keeps on its own disk (local-path volumes, "volumes" in the status script) is not this
+# script's business: the caller decides whether such a node may go.
+import json
+import os
+import re
+import subprocess
+import sys
+
+KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
+K3S = "/usr/local/bin/k3s"
+STATE_DIR = "/run/kvbox/k3s-drain"
+DRAIN_TIMEOUT = "600s"
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def kubectl(*args, timeout=20):
+    return subprocess.run([K3S, "kubectl", "--kubeconfig", KUBECONFIG, *args], capture_output=True, text=True, timeout=timeout)
+
+
+def unit(node):
+    return f"kvbox-k3s-drain-{node}.service"
+
+
+def error_file(node):
+    return os.path.join(STATE_DIR, f"{node}.error")
+
+
+def draining(node):
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit(node)], timeout=10).returncode == 0
+
+
+def exists(node):
+    """True when the cluster knows the node, False when it does not; exits when the API gives no answer."""
+    r = kubectl("get", "node", node, "-o", "name", "--request-timeout=8s")
+    if r.returncode == 0:
+        return True
+    if "NotFound" in r.stderr or "not found" in r.stderr:
+        return False
+    fail("the cluster's API does not answer (is this box the server, and is k3s up?)")
+
+
+def state(node):
+    if draining(node):
+        return {"node": node, "state": "draining"}
+    if not exists(node):
+        return {"node": node, "state": "done"}
+    try:
+        with open(error_file(node), encoding="utf-8") as f:
+            return {"node": node, "state": "failed", "error": f.read().strip()}
+    except OSError:
+        return {"node": node, "state": "idle"}
+
+
+def start(node):
+    if draining(node):
+        return {"node": node, "state": "draining"}
+    if not exists(node):
+        return {"node": node, "state": "done"}
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.remove(error_file(node))
+    except FileNotFoundError:
+        pass
+    r = subprocess.run(["systemd-run", "--quiet", "--collect", "--unit", unit(node), os.path.abspath(__file__), "--run", node],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0 and not draining(node):
+        fail(f"could not start the drain: {(r.stderr.strip().splitlines() or ['systemd-run failed'])[-1]}")
+    return {"node": node, "state": "draining"}
+
+
+def run(node):
+    """The background part: cordon, drain, delete the node. A failure is left in the error file."""
+    steps = (
+        (("cordon", node), 30),
+        (("drain", node, "--ignore-daemonsets", "--delete-emptydir-data", "--force", f"--timeout={DRAIN_TIMEOUT}"), 660),
+        (("delete", "node", node, "--timeout=60s"), 90),
+    )
+    for args, timeout in steps:
+        try:
+            r = kubectl(*args, timeout=timeout)
+            problem = None if r.returncode == 0 else (r.stderr.strip().splitlines() or [f"kubectl {args[0]} failed"])[-1]
+        except subprocess.TimeoutExpired:
+            problem = f"kubectl {args[0]} did not finish"
+        if problem:
+            os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+            with open(error_file(node), "w", encoding="utf-8") as f:
+                f.write(problem + "\n")
+            sys.exit(1)
+
+
+def valid(node):
+    return isinstance(node, str) and re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", node) is not None
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--run":
+        if not valid(sys.argv[2]):
+            fail("drain: not a node's name")
+        run(sys.argv[2])
+        return
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or data.get("op") not in ("start", "state"):
+        fail('drain needs {"op": "start" | "state", "node"}')
+    node = data.get("node")
+    if not valid(node):
+        fail("drain needs the node's name")
+    if not os.path.exists(KUBECONFIG):
+        fail("this box is not the cluster's server, or k3s has not started yet")
+    print(json.dumps(start(node) if data["op"] == "start" else state(node)))
+
+
+main()

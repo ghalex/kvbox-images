@@ -1,0 +1,27 @@
+# k3s, once kvbox-k3s-init has written its configuration (kvbox #214): before that the unit is skipped
+# at boot and the init starts it. One unit for both roles: kvbox-k3s-run starts `k3s server` or
+# `k3s agent` by /etc/kvbox/k3s.conf. kvbox-k3s-mounts runs first, at every start: k3s's data belongs
+# on the box's disk and, on a master, its state on the volume; when that volume is not mounted the
+# start fails and is tried again, so k3s never begins a new, empty cluster beside its data.
+[Unit]
+Description=k3s (kvbox Kubernetes: server or agent by the box's K3S_ROLE)
+ConditionPathExists=/etc/rancher/k3s/config.yaml
+After=network.target kvbox-volumes.service
+
+[Service]
+Type=notify
+ExecStartPre=/usr/local/sbin/kvbox-k3s-mounts
+ExecStart=/usr/local/sbin/kvbox-k3s-run
+# As k3s's own unit: pods outlive a restart of k3s, and it manages its own cgroups.
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

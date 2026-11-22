@@ -4,6 +4,7 @@
 #   ./release.sh base v0.1.0        # -> release "base-v0.1.0" with rootfs-base-<arch>.ext4.zst + .sha256
 #   ./release.sh postgres v0.1.0    # -> release "postgres-v0.1.0" with rootfs-postgres-<arch>.ext4.zst + .sha256
 #   ./release.sh redis v0.1.0       # -> release "redis-v0.1.0" with rootfs-redis-<arch>.ext4.zst + .sha256
+#   ./release.sh k3s v0.1.0         # -> release "k3s-v0.1.0" with rootfs-k3s-<arch>.ext4.zst + .sha256
 #   ./release.sh kernel v6.1.190-1  # -> release "kernel-v6.1.190-1" with vmlinux-<arch> + .sha256
 #   ./release.sh kernel-android v6.1.190-1  # -> release "kernel-android-v6.1.190-1" with vmlinux-android-<arch> + .sha256
 #
@@ -88,6 +89,8 @@ case "$image" in
           how="kvbox new cache --base redis" ;;
   garage) what="Garage guest image $version ($arch): the base image plus Garage $(docker run --rm kvbox-garage:local garage --version | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' | head -n 1) (the Garage project's own build, speaks the S3 protocol), one node on port 3900 with its data on a volume from GARAGE_DATA and its S3 region from GARAGE_REGION; scripts make buckets and their access keys. What kvbox's Object Storage runs on (kvbox #182)."
           how="kvbox bucket create uploads" ;;
+  k3s)    what="k3s guest image $version ($arch): the base image plus k3s $(docker run --rm kvbox-k3s:local k3s --version | sed -n 's/^k3s version \([^ ]*\).*/\1/p') (the k3s project's own release) with the images it needs to come up baked in; server or agent from the box's K3S_ROLE, the join token from K3S_TOKEN, a server's state on a volume with K3S_DATA; scripts for the kubeconfig, the nodes and draining one. What kvbox's managed Kubernetes runs on (kvbox #214)."
+          how="./install-server.sh --update" ;;
   android) what="Android guest image $version ($arch): the base image plus Java 17, Maven, the Android SDK (platform-tools, build-tools) and Appium $(docker run --rm kvbox-android:local appium --version) with the UiAutomator2 driver; Android runs as a Redroid container started at boot, adb on localhost:5600. Boots the android kernel (kernel-android, binder)."
           how="kvbox new phone --base android --size l" ;;
   kernel-android) what="Android guest kernel $version ($arch): Linux $(cat "$here/kernel-android/out/vmlinux.version") with kernel/kvbox.config plus kernel/android.config (binder), booted only by boxes of the android image."

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# kvbox-k3s-run (kvbox #214): k3s.service's ExecStart. Starts k3s in the role kvbox-k3s-init wrote to
+# /etc/kvbox/k3s.conf; everything else k3s reads from /etc/rancher/k3s/config.yaml.
+set -euo pipefail
+
+role=""
+while IFS='=' read -r key value; do
+  [[ "$key" == ROLE ]] && role="$value"
+done < /etc/kvbox/k3s.conf
+
+case "$role" in
+  server|agent) exec /usr/local/bin/k3s "$role" ;;
+  *) echo "kvbox-k3s-run: /etc/kvbox/k3s.conf names no role (server or agent)" >&2; exit 1 ;;
+esac

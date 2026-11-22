@@ -1,0 +1,13 @@
+# Once per box: k3s's role, join token and configuration from the box owner's K3S_* variables
+# (kvbox #214). Not a oneshot, so waiting for the host's env push never holds up the boot.
+[Unit]
+Description=kvbox: k3s's role and configuration from the box owner's environment (once)
+ConditionPathExists=!/var/lib/kvbox/k3s-init.done
+After=kvbox-agent.service kvbox-volumes.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/kvbox-k3s-init
+
+[Install]
+WantedBy=multi-user.target

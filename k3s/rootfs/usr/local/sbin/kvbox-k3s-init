@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# kvbox-k3s-init (kvbox #214): make this box the server or an agent of a cluster, once per box. Run by
+# kvbox-k3s-init.service, which is skipped once the marker exists.
+#
+# The host sends the box's variables through kvbox-agent's "env" a few seconds after boot; the agent
+# writes /etc/kvbox/env and touches /run/kvbox/env-ready. k3s does not run before this script has
+# written its configuration (k3s.service is skipped while /etc/rancher/k3s/config.yaml is missing).
+#
+#   K3S_ROLE      server | agent
+#   K3S_TOKEN     the cluster's join token, the same on every box of it
+#   K3S_URL       agent only: the server's address, https://<name or address>:6443
+#   K3S_TLS_SAN   server only, optional: more names or addresses for the API's certificate, comma
+#                 separated (the public address kubectl uses from outside)
+#   K3S_DATA      server only, optional: a directory on a volume (/mnt/<volume>/…) for the cluster's
+#                 state; without it the state is on the box's own disk
+#
+# So: wait for the variables, check them, write /etc/kvbox/k3s.conf (role and data directory, read by
+# kvbox-k3s-mounts and kvbox-k3s-run) and /etc/rancher/k3s/config.yaml, start k3s.service, wait until
+# it is up and write the marker. A server only runs the system's own pods (taint CriticalAddonsOnly).
+# The node's name is the box's name. Every step is idempotent, so an interrupted run is redone at the
+# next boot. With a variable missing or wrong nothing is written: a later boot that has it retries.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/k3s-init.done
+CONF=/etc/kvbox/k3s.conf
+K3S_CONF=/etc/rancher/k3s/config.yaml
+WAIT_ENV=300   # seconds for the host's env push
+WAIT_K3S=600   # seconds for k3s to be up (a first start unpacks the baked images)
+
+log() { echo "kvbox-k3s-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); k3s not started, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+ROLE="" TOKEN="" URL="" TLS_SAN="" DATA=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      K3S_ROLE)    ROLE="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_TOKEN)   TOKEN="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_URL)     URL="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_TLS_SAN) TLS_SAN="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_DATA)    DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+if [[ "$ROLE" != server && "$ROLE" != agent ]]; then
+  log "K3S_ROLE=\"$ROLE\" in $ENV_FILE is neither server nor agent; k3s not started, retrying at next boot"
+  exit 1
+fi
+# The token goes into a YAML double-quoted string, so only what needs no escaping there.
+re_token='^[A-Za-z0-9._:~+/=@-]{8,}$'
+if [[ ! "$TOKEN" =~ $re_token ]]; then
+  log "K3S_TOKEN is missing, shorter than 8 characters or has something other than letters, digits and . _ : ~ + / = @ -; k3s not started, retrying at next boot"
+  exit 1
+fi
+
+sans=()
+if [[ "$ROLE" == agent ]]; then
+  re_url='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$'
+  if [[ ! "$URL" =~ $re_url ]]; then
+    log "K3S_URL=\"$URL\" is not the server's address (https://<name or address>:6443); k3s not started, retrying at next boot"
+    exit 1
+  fi
+  DATA=""
+else
+  if [[ -n "$TLS_SAN" ]]; then
+    re_san='^[A-Za-z0-9]([A-Za-z0-9.:-]*[A-Za-z0-9])?$'
+    IFS=',' read -r -a sans <<< "$TLS_SAN"
+    for san in "${sans[@]}"; do
+      if [[ ! "$san" =~ $re_san ]]; then
+        log "K3S_TLS_SAN has \"$san\", which is not a name or an address; k3s not started, retrying at next boot"
+        exit 1
+      fi
+    done
+  fi
+  if [[ -n "$DATA" ]]; then
+    # /mnt/<volume>[/<path>]: only a mounted volume, never the box's own disk under an unmounted /mnt/<volume>.
+    re_data='^/mnt/([A-Za-z0-9][A-Za-z0-9._-]*)(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+    if [[ ! "$DATA" =~ $re_data ]]; then
+      log "K3S_DATA=\"$DATA\" is not a directory on a volume (/mnt/<volume>/<directory>); nothing done"
+      exit 1
+    fi
+    volume="/mnt/${BASH_REMATCH[1]}"
+    if ! mountpoint -q "$volume"; then
+      log "K3S_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+      exit 1
+    fi
+    # On a volume the state sits one level down, never on the mount point itself.
+    [[ "$DATA" == "$volume" ]] && DATA="$volume/k3s"
+  fi
+fi
+
+# A file is written beside its place and renamed, so k3s never reads half of one.
+write_file() { # <file>, content on stdin
+  local tmp="$1.tmp"
+  (umask 077 && cat > "$tmp")
+  mv "$tmp" "$1"
+}
+
+install -d -m 0755 "$(dirname "$CONF")"
+install -d -m 0755 /etc/rancher/k3s
+
+# $DATA has only [A-Za-z0-9._/-] (checked above), so the file needs no quoting.
+printf 'ROLE=%s\nDATA=%s\n' "$ROLE" "$DATA" | write_file "$CONF"
+
+{
+  echo "# kvbox-k3s-init: this box's part in its cluster, from the box's K3S_* variables"
+  echo "token: \"$TOKEN\""
+  echo "node-name: \"$(hostname)\""
+  if [[ "$ROLE" == agent ]]; then
+    echo "server: \"$URL\""
+  else
+    # Only the system's own pods run on the server; what the owner deploys lands on the nodes.
+    echo "node-taint:"
+    echo "  - \"CriticalAddonsOnly=true:NoExecute\""
+    if (( ${#sans[@]} > 0 )); then
+      echo "tls-san:"
+      for san in "${sans[@]}"; do echo "  - \"$san\""; done
+    fi
+  fi
+} | write_file "$K3S_CONF"
+
+systemctl restart --no-block k3s.service
+
+up() {
+  if [[ "$ROLE" == server ]]; then
+    [[ "$(k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get --raw /readyz --request-timeout=5s 2>/dev/null)" == ok ]]
+  else
+    # Type=notify: the unit is active once the agent has joined the server.
+    systemctl is-active --quiet k3s.service
+  fi
+}
+
+for ((i = 0; i < WAIT_K3S; i += 2)); do
+  up && break
+  sleep 2
+done
+if ! up; then
+  log "gave up: k3s not up after ${WAIT_K3S}s (journalctl -u k3s); it keeps trying, and the next boot checks again"
+  exit 1
+fi
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+if [[ -n "$DATA" ]]; then
+  log "done: k3s runs as $ROLE, the cluster's state in $DATA"
+else
+  log "done: k3s runs as $ROLE"
+fi

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# kvbox-k3s-mounts (kvbox #214): put k3s's directories where they must be, before every start of
+# k3s.service. Every step is skipped when already done, so a restart of k3s changes nothing.
+#
+#   /var/lib/rancher, /var/lib/kubelet   directories of the box's own disk (/rom/overlay/…). A box's /
+#       is an overlayfs, and containerd's overlayfs snapshotter refuses to keep its layers on one; the
+#       base image does the same for /var/lib/docker.
+#   /var/lib/rancher/k3s/agent/images    the images baked into this image
+#       (/usr/local/share/kvbox/k3s-images), which k3s loads at start instead of pulling them.
+#   /var/lib/rancher/k3s/server          on a server with DATA in /etc/kvbox/k3s.conf (K3S_DATA): that
+#       directory of the volume, so the cluster's state lives on the volume. The volume must be
+#       mounted: when it is not, this fails and k3s is not started.
+set -euo pipefail
+
+log() { echo "kvbox-k3s-mounts: $*" >&2; }
+
+bind() { # <source> <target>
+  mkdir -p "$1" "$2"
+  mountpoint -q "$2" || mount --bind "$1" "$2"
+}
+
+role="" data=""
+while IFS='=' read -r key value; do
+  case "$key" in
+    ROLE) role="$value" ;;
+    DATA) data="$value" ;;
+  esac
+done < /etc/kvbox/k3s.conf
+
+# Without a box disk (the image booted straight from its root, no overlay) / is a plain ext4 already.
+if [[ -d /rom/overlay ]]; then
+  bind /rom/overlay/rancher /var/lib/rancher
+  bind /rom/overlay/kubelet /var/lib/kubelet
+fi
+bind /usr/local/share/kvbox/k3s-images /var/lib/rancher/k3s/agent/images
+
+if [[ "$role" == server && -n "$data" ]]; then
+  volume="$(cut -d/ -f1-3 <<< "$data")"
+  if ! mountpoint -q "$volume"; then
+    log "the cluster's state is on $volume, which is not mounted: k3s is not started without it"
+    exit 1
+  fi
+  install -d -m 0700 "$data"
+  bind "$data" /var/lib/rancher/k3s/server
+fi

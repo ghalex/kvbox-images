@@ -11,6 +11,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 and pgvector from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 (S3) and 3902 (public buckets, no signature) with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
+| `k3s/` | `k3s-vX.Y.Z` | Everything in `base` plus [k3s](https://k3s.io) 1.37 (Apache 2.0, Kubernetes) from the k3s project's own release, with the images it needs to come up baked in; one image for a cluster's server and its nodes, the role and the join token come from the box's environment; what kvbox's managed Kubernetes runs on (see [The k3s image](#the-k3s-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `android/` | `android-vX.Y.Z` | Everything in `base` plus Java 17, Maven, the Android SDK's command-line tools, platform-tools (adb) and build-tools, Appium with the UiAutomator2 driver; Android itself runs as a [Redroid](https://github.com/remote-android/redroid-doc) container started at boot. Boots the android kernel (see [The android image](#the-android-image)) |
 | `kernel/` | `kernel-vX.Y.Z-N` | Linux 6.1 LTS (`X.Y.Z`) with Firecracker's CI config plus `kernel/kvbox.config`; `N` is the recipe revision |
@@ -63,7 +64,9 @@ networking could start. `kernel/` builds the same Linux 6.1 LTS from
 kernel.org with that CI config as the base (`firecracker-ci-x86_64-6.1.config`,
 extracted from Firecracker's own build) and the additions in `kvbox.config`:
 Docker's netfilter requirements, nf_tables, a few network drivers, FUSE,
-`/proc/config.gz`. x86_64 only for now.
+`/proc/config.gz`, and what Kubernetes writes its rules with (the `statistic`,
+`physdev`, `recent` and `limit` matches, NFLOG, ipsets, a minimal IPVS, plus the
+matches other network plugins and service meshes use). x86_64 only for now.
 
 ## How an image works
 
@@ -410,6 +413,71 @@ kvbox new cache --base redis                       # the password is generated a
 kvbox new cache --base redis -e REDIS_PASSWORD=x
 ```
 
+## The k3s image
+
+`k3s/` (kvbox issue #214) is `FROM kvbox-base:local` plus k3s: the one binary
+(`/usr/local/bin/k3s`, also as `kubectl` and `crictl`) and k3s's "airgap"
+images (coredns, traefik, local-path, metrics-server, klipper, pause) from the
+k3s project's GitHub release, the version and four checksums pinned in the
+Dockerfile (`K3S_VERSION`). Nothing is downloaded when a box boots. Every box
+of a cluster runs this image, its server (the master) and its nodes alike; it
+is what kvbox's managed Kubernetes is made of.
+
+```json
+{
+  "autoHibernate": false,
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-k3s-status",
+    "kubeconfig": "/usr/local/sbin/kvbox-k3s-kubeconfig",
+    "drain": "/usr/local/sbin/kvbox-k3s-drain"
+  }
+}
+```
+
+Nothing runs until the box knows its part: `k3s.service` is skipped while
+`/etc/rancher/k3s/config.yaml` is missing. `kvbox-k3s-init.service` runs at
+every boot until `/var/lib/kvbox/k3s-init.done` exists: it waits for
+`/run/kvbox/env-ready` (up to 5 minutes), reads the box's variables from
+`/etc/kvbox/env` (parsed, never sourced), checks them, writes
+`/etc/kvbox/k3s.conf` (role and data directory) and k3s's `config.yaml`, starts
+`k3s.service`, waits until it is up (the API answers ready on a server, the
+unit is active on an agent) and writes the marker. With a variable missing or
+wrong nothing is written and the next boot retries.
+
+| Variable | For | Meaning |
+|---|---|---|
+| `K3S_ROLE` | both | `server` or `agent` |
+| `K3S_TOKEN` | both | the cluster's join token, the same on every box of it (8+ characters of letters, digits and `. _ : ~ + / = @ -`) |
+| `K3S_URL` | agent | the server's address, `https://<name or address>:6443` |
+| `K3S_TLS_SAN` | server, optional | more names or addresses for the API's certificate, comma separated: the public address `kubectl` uses from outside |
+| `K3S_DATA` | server, optional | a directory on a volume (`/mnt/<volume>/…`, a bare `/mnt/<volume>` becomes `/mnt/<volume>/k3s`) for the cluster's state; without it the state is on the box's own disk |
+
+- The node's name is the box's name.
+- A server gets the taint `CriticalAddonsOnly=true:NoExecute`: only the
+  system's own pods run on it, what the owner deploys lands on the nodes.
+- `kvbox-k3s-mounts` runs before every start of k3s. A box's `/` is an
+  overlayfs, and containerd's overlayfs snapshotter refuses to keep its layers
+  on one, so `/var/lib/rancher` and `/var/lib/kubelet` are directories of the
+  box's own disk (`/rom/overlay/…`), as the base image does for
+  `/var/lib/docker`. The baked images (`/usr/local/share/kvbox/k3s-images`) are
+  mounted where k3s looks for them. With `K3S_DATA`, that directory is mounted
+  on `/var/lib/rancher/k3s/server`; when its volume is not mounted the start
+  fails and is tried again, so k3s never begins a new, empty cluster beside its
+  data.
+
+The scripts take one JSON object and answer one; `kubeconfig` and `drain` are
+for the server.
+
+| Script | Input | Output |
+|---|---|---|
+| `status` | none | `{"ready", "role", "version", "accepting", "nodes"}`; `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes"}` each, `volumes` the bound persistent volumes kept on that node's disk |
+| `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
+| `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
+| `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |
+
+When something is wrong, the box's journal says what: `journalctl -u
+kvbox-k3s-init` and `journalctl -u k3s`. Needs kernel `v6.1.190-3` or later.
+
 ## The gh-runner image
 
 `gh-runner/` (kvbox issue #100) is `FROM kvbox-base:local` plus GitHub's
@@ -496,6 +564,7 @@ ROOTFS_SIZE=16G base/build.sh # larger disk
 postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Dockerfile first (kvbox-base:local)
 redis/build.sh                # -> redis/out/rootfs.ext4; same
 gh-runner/build.sh            # -> gh-runner/out/rootfs.ext4; same
+k3s/build.sh                  # -> k3s/out/rootfs.ext4; same
 android/build.sh              # -> android/out/rootfs.ext4 (10 GiB sparse); same
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 kernel-android/build.sh       # -> kernel-android/out/vmlinux: the same plus kernel/android.config
@@ -518,6 +587,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ./release.sh base v0.4.0        # builds, then publishes release base-v0.4.0
 ./release.sh postgres v0.1.0    # builds, then publishes release postgres-v0.1.0 (rootfs-postgres-<arch>.ext4.zst)
 ./release.sh redis v0.1.0       # builds, then publishes release redis-v0.1.0 (rootfs-redis-<arch>.ext4.zst)
+./release.sh k3s v0.1.0         # builds, then publishes release k3s-v0.1.0 (rootfs-k3s-<arch>.ext4.zst)
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ./release.sh android v0.1.0     # builds, then publishes release android-v0.1.0 (rootfs-android-<arch>.ext4.zst)
 ./release.sh kernel-android v6.1.190-1  # builds, then publishes release kernel-android-v6.1.190-1 (vmlinux-android-<arch>)
