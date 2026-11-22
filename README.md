@@ -454,7 +454,11 @@ wrong nothing is written and the next boot retries.
 
 - The node's name is the box's name.
 - A server gets the taint `CriticalAddonsOnly=true:NoExecute`: only the
-  system's own pods run on it, what the owner deploys lands on the nodes.
+  system's own pods run on it, what the owner deploys lands on the nodes. The
+  init adds it once k3s's own install jobs are done (up to 5 minutes), not in
+  k3s's configuration: those jobs do not tolerate it, so a server tainted from
+  its first start would have no Traefik until a node joined. Traefik tolerates
+  the taint and stays on the server.
 - `kvbox-k3s-mounts` runs before every start of k3s. A box's `/` is an
   overlayfs, and containerd's overlayfs snapshotter refuses to keep its layers
   on one, so `/var/lib/rancher` and `/var/lib/kubelet` are directories of the
@@ -470,7 +474,7 @@ for the server.
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{"ready", "role", "version", "accepting", "nodes"}`; `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes"}` each, `volumes` the bound persistent volumes kept on that node's disk |
+| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes"}` each, `volumes` the bound persistent volumes kept on that node's disk |
 | `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |

@@ -3,6 +3,7 @@
 # /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
 #
 #   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true,
+#    "ingress": true,
 #    "nodes": [{"name": "prod-a1", "ready": true, "schedulable": true, "roles": [], "version": "v1.37.2+k3s1",
 #               "address": "172.30.0.12", "volumes": 2}]}
 #
@@ -10,6 +11,8 @@
 # role        server or agent (absent before the init has read the box's variables)
 # version     k3s's own version, from the binary
 # accepting   server: the API answers ready; agent: k3s is running and has joined
+# ingress     server only, absent while not accepting: Traefik is installed and has a pod available, so
+#             the cluster answers on ports 80 and 443
 # nodes       server only, absent while not accepting: every node the cluster knows, the server itself
 #             included. schedulable is false for a cordoned node; roles are the node-role labels
 #             ("control-plane" on the server); volumes counts the bound persistent volumes kept on
@@ -100,6 +103,13 @@ def nodes():
     return sorted(result, key=lambda n: n["name"])
 
 
+def ingress():
+    out = kubectl("-n", "kube-system", "get", "deployment", "traefik", "-o", "json")
+    if out is None:
+        return False
+    return (json.loads(out).get("status", {}).get("availableReplicas") or 0) >= 1
+
+
 def main():
     out = {"ready": os.path.exists(MARKER), "accepting": False}
     r = role()
@@ -111,6 +121,7 @@ def main():
     if r == "server":
         out["accepting"] = (kubectl("get", "--raw", "/readyz") or "").strip() == "ok"
         if out["accepting"]:
+            out["ingress"] = ingress()
             listed = nodes()
             if listed is not None:
                 out["nodes"] = listed

@@ -16,7 +16,8 @@
 #
 # So: wait for the variables, check them, write /etc/kvbox/k3s.conf (role and data directory, read by
 # kvbox-k3s-mounts and kvbox-k3s-run) and /etc/rancher/k3s/config.yaml, start k3s.service, wait until
-# it is up and write the marker. A server only runs the system's own pods (taint CriticalAddonsOnly).
+# it is up and write the marker. A server only runs the system's own pods: once k3s has installed
+# Traefik there, the node gets the taint CriticalAddonsOnly=true:NoExecute.
 # The node's name is the box's name. Every step is idempotent, so an interrupted run is redone at the
 # next boot. With a variable missing or wrong nothing is written: a later boot that has it retries.
 set -euo pipefail
@@ -28,6 +29,9 @@ CONF=/etc/kvbox/k3s.conf
 K3S_CONF=/etc/rancher/k3s/config.yaml
 WAIT_ENV=300   # seconds for the host's env push
 WAIT_K3S=600   # seconds for k3s to be up (a first start unpacks the baked images)
+WAIT_INSTALL=300   # seconds for k3s's own install jobs on a server
+INSTALL_JOBS=3     # helm-install-traefik, helm-install-traefik-crd, helm-install-gateway-api-crd
+TAINT="CriticalAddonsOnly=true:NoExecute"
 
 log() { echo "kvbox-k3s-init: $*" >&2; }
 
@@ -140,9 +144,6 @@ printf 'ROLE=%s\nDATA=%s\n' "$ROLE" "$DATA" | write_file "$CONF"
   if [[ "$ROLE" == agent ]]; then
     echo "server: \"$URL\""
   else
-    # Only the system's own pods run on the server; what the owner deploys lands on the nodes.
-    echo "node-taint:"
-    echo "  - \"CriticalAddonsOnly=true:NoExecute\""
     if (( ${#sans[@]} > 0 )); then
       echo "tls-san:"
       for san in "${sans[@]}"; do echo "  - \"$san\""; done
@@ -168,6 +169,29 @@ done
 if ! up; then
   log "gave up: k3s not up after ${WAIT_K3S}s (journalctl -u k3s); it keeps trying, and the next boot checks again"
   exit 1
+fi
+
+# Only the system's own pods run on the server; what the owner deploys lands on the nodes. The taint
+# is not in k3s's configuration: the jobs that install Traefik do not tolerate it, so on a server
+# tainted from its first start they wait for a node and the cluster has no ingress until one joins.
+# So the server starts untainted, the jobs run here, then the taint is added; Traefik tolerates it and
+# stays. Whatever else landed here meanwhile is moved off by the taint (NoExecute).
+if [[ "$ROLE" == server ]]; then
+  kubectl() { k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml --request-timeout=10s "$@"; }
+  installed() { # k3s's install jobs (traefik, its CRDs, the gateway API's) are all there and all done
+    local states
+    states="$(kubectl -n kube-system get jobs -o 'jsonpath={range .items[*]}{.status.succeeded}{"\n"}{end}' 2>/dev/null)" || return 1
+    [[ "$(grep -c . <<< "$states")" -ge "$INSTALL_JOBS" && "$(grep -cx 1 <<< "$states")" == "$(grep -c . <<< "$states")" ]]
+  }
+  for ((i = 0; i < WAIT_INSTALL; i += 2)); do
+    installed && break
+    sleep 2
+  done
+  installed || log "k3s's install jobs are not done after ${WAIT_INSTALL}s (kubectl -n kube-system get jobs): Traefik may be missing until a node joins"
+  if ! kubectl taint node "$(hostname)" "$TAINT" --overwrite >/dev/null; then
+    log "could not taint this node ($TAINT); retrying at next boot"
+    exit 1
+  fi
 fi
 
 install -d -m 0755 "$(dirname "$MARKER")"
