@@ -1,2 +1,5 @@
-# built images are release assets, never committed
-*/out/
+# built images are release assets, never committed (a folder, or a link to one on another disk)
+*/out
+# Python's compiled files: made by running a script here, never part of an image
+__pycache__/
+*.pyc
