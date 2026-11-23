@@ -10,6 +10,7 @@
 #   {"op": "state", "node": "prod-a1"}   ->   {"node": "prod-a1", "state": "draining" | "done" | "failed" | "idle",
 #                                              "error": "…"}   (error only with failed)
 #   {"op": "delete", "node": "prod-a1"}  ->   {"node": "prod-a1", "state": "done"}
+#   {"op": "stop", "node": "prod-a1"}    ->   {"node": "prod-a1", "state": "idle" | "done"}
 #
 # start   cordons the node, moves its pods away (DaemonSet pods stay, emptyDir data goes, a pod no
 #         controller owns is deleted) and then deletes the node object. A node the cluster does not
@@ -18,6 +19,9 @@
 # delete  the node out of the cluster at once, nothing waited for (v0.1.2): a drain of it is stopped,
 #         the node object is deleted and the cluster makes its pods again elsewhere. For a node whose
 #         box is going whatever its pods say (a drain that will not end, a box that never joined).
+# stop    a drain of the node given up (v0.1.3): its unit is stopped before it gets to delete the node,
+#         which stays in the cluster, cordoned (kubectl uncordon puts it back to work). For a caller
+#         whose wait ran out and who keeps the node.
 #
 # What a node keeps on its own disk (local-path volumes, "volumes" in the status script) is not this
 # script's business: the caller decides whether such a node may go.
@@ -106,6 +110,15 @@ def delete(node):
     return {"node": node, "state": "done"}
 
 
+def stop(node):
+    subprocess.run(["systemctl", "stop", unit(node)], capture_output=True, timeout=30)
+    try:
+        os.remove(error_file(node))
+    except OSError:
+        pass
+    return {"node": node, "state": "idle" if exists(node) else "done"}
+
+
 def run(node):
     """The background part: cordon, drain, delete the node. A failure is left in the error file."""
     steps = (
@@ -130,7 +143,7 @@ def valid(node):
     return isinstance(node, str) and re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", node) is not None
 
 
-OPS = {"start": start, "state": state, "delete": delete}
+OPS = {"start": start, "state": state, "delete": delete, "stop": stop}
 
 
 def main():
@@ -144,7 +157,7 @@ def main():
     except ValueError:
         data = None
     if not isinstance(data, dict) or data.get("op") not in OPS:
-        fail('drain needs {"op": "start" | "state" | "delete", "node"}')
+        fail('drain needs {"op": "start" | "state" | "delete" | "stop", "node"}')
     node = data.get("node")
     if not valid(node):
         fail("drain needs the node's name")

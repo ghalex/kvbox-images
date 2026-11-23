@@ -479,6 +479,7 @@ for the server.
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |
 | `drain` | `{"op": "delete", "node"}` | `{"node", "state": "done"}`; the node out of the cluster at once, nothing waited for (v0.1.2): a drain of it is stopped and the node object deleted, for a node whose box goes whatever its pods say |
+| `drain` | `{"op": "stop", "node"}` | `{"node", "state"}`: a drain given up (v0.1.3): its unit stopped before it deletes the node, which stays cordoned (`idle`, or `done` when the cluster no longer knows it) |
 
 When something is wrong, the box's journal says what: `journalctl -u
 kvbox-k3s-init` and `journalctl -u k3s`. Needs kernel `v6.1.190-3` or later.
