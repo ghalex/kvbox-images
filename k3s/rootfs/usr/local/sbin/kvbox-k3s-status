@@ -5,7 +5,7 @@
 #   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true,
 #    "ingress": true,
 #    "nodes": [{"name": "prod-a1", "ready": true, "schedulable": true, "roles": [], "version": "v1.37.2+k3s1",
-#               "address": "172.30.0.12", "volumes": 2}]}
+#               "address": "172.30.0.12", "volumes": 2, "claims": ["default/data-pg-0", "default/cache"]}]}
 #
 # ready       kvbox-k3s-init has finished: k3s has its role and configuration and came up once
 # role        server or agent (absent before the init has read the box's variables)
@@ -16,7 +16,9 @@
 # nodes       server only, absent while not accepting: every node the cluster knows, the server itself
 #             included. schedulable is false for a cordoned node; roles are the node-role labels
 #             ("control-plane" on the server); volumes counts the bound persistent volumes kept on
-#             that node's disk (local-path), which is the data a removal of the node would lose
+#             that node's disk (local-path), which is the data a removal of the node would lose;
+#             claims names them (v0.1.2): the claim each is bound to as namespace/name, or the volume's
+#             own name when it has none
 import json
 import os
 import re
@@ -59,11 +61,11 @@ def kubectl(*args):
 
 
 def volumes_per_node():
-    """How many bound persistent volumes are pinned to each node (local-path names the node's hostname)."""
-    counts = {}
+    """The bound persistent volumes pinned to each node (local-path names the node's hostname), by their claim."""
+    held = {}
     out = kubectl("get", "pv", "-o", "json")
     if out is None:
-        return counts
+        return held
     for pv in json.loads(out).get("items", []):
         if pv.get("status", {}).get("phase") != "Bound":
             continue
@@ -73,9 +75,11 @@ def volumes_per_node():
             for match in term.get("matchExpressions", []) + term.get("matchFields", []):
                 if match.get("key") in HOSTNAME_KEYS and match.get("operator") == "In":
                     names.update(match.get("values", []))
+        claim = pv.get("spec", {}).get("claimRef") or {}
+        label = f"{claim.get('namespace', 'default')}/{claim['name']}" if claim.get("name") else pv.get("metadata", {}).get("name", "")
         for name in names:
-            counts[name] = counts.get(name, 0) + 1
-    return counts
+            held.setdefault(name, []).append(label)
+    return held
 
 
 def nodes():
@@ -95,7 +99,8 @@ def nodes():
             "schedulable": not spec.get("unschedulable", False),
             "roles": sorted(k[len(ROLE_LABEL):] for k in meta.get("labels", {}) if k.startswith(ROLE_LABEL) and k != ROLE_LABEL),
             "version": status.get("nodeInfo", {}).get("kubeletVersion"),
-            "volumes": volumes.get(name, 0),
+            "volumes": len(volumes.get(name, [])),
+            "claims": sorted(volumes.get(name, [])),
         }
         if address:
             entry["address"] = address

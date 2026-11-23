@@ -9,11 +9,15 @@
 #   {"op": "start", "node": "prod-a1"}   ->   {"node": "prod-a1", "state": "draining"}
 #   {"op": "state", "node": "prod-a1"}   ->   {"node": "prod-a1", "state": "draining" | "done" | "failed" | "idle",
 #                                              "error": "…"}   (error only with failed)
+#   {"op": "delete", "node": "prod-a1"}  ->   {"node": "prod-a1", "state": "done"}
 #
 # start   cordons the node, moves its pods away (DaemonSet pods stay, emptyDir data goes, a pod no
 #         controller owns is deleted) and then deletes the node object. A node the cluster does not
 #         know is "done" at once; one already draining stays "draining"; after "failed", start again.
 # state   done: the node object is gone. idle: the node is there and nothing drains it.
+# delete  the node out of the cluster at once, nothing waited for (v0.1.2): a drain of it is stopped,
+#         the node object is deleted and the cluster makes its pods again elsewhere. For a node whose
+#         box is going whatever its pods say (a drain that will not end, a box that never joined).
 #
 # What a node keeps on its own disk (local-path volumes, "volumes" in the status script) is not this
 # script's business: the caller decides whether such a node may go.
@@ -89,6 +93,19 @@ def start(node):
     return {"node": node, "state": "draining"}
 
 
+def delete(node):
+    subprocess.run(["systemctl", "stop", unit(node)], capture_output=True, timeout=30)
+    try:
+        os.remove(error_file(node))
+    except OSError:
+        pass
+    if exists(node):
+        r = kubectl("delete", "node", node, "--wait=false", "--request-timeout=15s")
+        if r.returncode != 0 and "NotFound" not in r.stderr and "not found" not in r.stderr:
+            fail(f"could not delete the node: {(r.stderr.strip().splitlines() or ['kubectl delete failed'])[-1]}")
+    return {"node": node, "state": "done"}
+
+
 def run(node):
     """The background part: cordon, drain, delete the node. A failure is left in the error file."""
     steps = (
@@ -113,6 +130,9 @@ def valid(node):
     return isinstance(node, str) and re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", node) is not None
 
 
+OPS = {"start": start, "state": state, "delete": delete}
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--run":
         if not valid(sys.argv[2]):
@@ -123,14 +143,14 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         data = None
-    if not isinstance(data, dict) or data.get("op") not in ("start", "state"):
-        fail('drain needs {"op": "start" | "state", "node"}')
+    if not isinstance(data, dict) or data.get("op") not in OPS:
+        fail('drain needs {"op": "start" | "state" | "delete", "node"}')
     node = data.get("node")
     if not valid(node):
         fail("drain needs the node's name")
     if not os.path.exists(KUBECONFIG):
         fail("this box is not the cluster's server, or k3s has not started yet")
-    print(json.dumps(start(node) if data["op"] == "start" else state(node)))
+    print(json.dumps(OPS[data["op"]](node)))
 
 
 main()

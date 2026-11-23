@@ -474,10 +474,11 @@ for the server.
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes"}` each, `volumes` the bound persistent volumes kept on that node's disk |
+| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2) |
 | `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |
+| `drain` | `{"op": "delete", "node"}` | `{"node", "state": "done"}`; the node out of the cluster at once, nothing waited for (v0.1.2): a drain of it is stopped and the node object deleted, for a node whose box goes whatever its pods say |
 
 When something is wrong, the box's journal says what: `journalctl -u
 kvbox-k3s-init` and `journalctl -u k3s`. Needs kernel `v6.1.190-3` or later.
