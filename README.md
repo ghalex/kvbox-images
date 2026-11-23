@@ -474,7 +474,7 @@ for the server.
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2) |
+| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2); `nodes` is absent when the nodes or their volumes could not be listed (v0.1.3) |
 | `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |

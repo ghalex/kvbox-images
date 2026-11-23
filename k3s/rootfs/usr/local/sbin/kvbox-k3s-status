@@ -18,7 +18,8 @@
 #             ("control-plane" on the server); volumes counts the bound persistent volumes kept on
 #             that node's disk (local-path), which is the data a removal of the node would lose;
 #             claims names them (v0.1.2): the claim each is bound to as namespace/name, or the volume's
-#             own name when it has none
+#             own name when it has none. Absent as a whole when the nodes or their volumes could not be
+#             listed (v0.1.3): a count of 0 is never a guess
 import json
 import os
 import re
@@ -61,11 +62,12 @@ def kubectl(*args):
 
 
 def volumes_per_node():
-    """The bound persistent volumes pinned to each node (local-path names the node's hostname), by their claim."""
+    """The bound persistent volumes pinned to each node (local-path names the node's hostname), by their claim;
+    None when the API did not list them, which is not "no volumes" (v0.1.3)."""
     held = {}
     out = kubectl("get", "pv", "-o", "json")
     if out is None:
-        return held
+        return None
     for pv in json.loads(out).get("items", []):
         if pv.get("status", {}).get("phase") != "Bound":
             continue
@@ -87,6 +89,8 @@ def nodes():
     if out is None:
         return None
     volumes = volumes_per_node()
+    if volumes is None:
+        return None
     result = []
     for node in json.loads(out).get("items", []):
         meta, spec, status = node.get("metadata", {}), node.get("spec", {}), node.get("status", {})
