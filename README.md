@@ -468,6 +468,12 @@ wrong nothing is written and the next boot retries.
   on `/var/lib/rancher/k3s/server`; when its volume is not mounted the start
   fails and is tried again, so k3s never begins a new, empty cluster beside its
   data.
+- On a server `kvbox-k3s-mounts` also writes
+  `server/manifests/kvbox-traefik.yaml` (a `HelmChartConfig`): Traefik trusts
+  the `X-Forwarded-*` headers on its port 80, so an app behind an Ingress sees
+  `https` and the visitor's address when kvbox's edge ends TLS for the cluster
+  (kvbox #219). That port is reached only by the box's host and the cluster's
+  own boxes and pods.
 
 The scripts take one JSON object and answer one; `kubeconfig` and `drain` are
 for the server.

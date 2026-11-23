@@ -10,6 +10,8 @@
 #   /var/lib/rancher/k3s/server          on a server with DATA in /etc/kvbox/k3s.conf (K3S_DATA): that
 #       directory of the volume, so the cluster's state lives on the volume. The volume must be
 #       mounted: when it is not, this fails and k3s is not started.
+#   /var/lib/rancher/k3s/server/manifests/kvbox-traefik.yaml   on a server: Traefik trusts the
+#       forwarded headers kvbox's edge sends (kvbox #219).
 set -euo pipefail
 
 log() { echo "kvbox-k3s-mounts: $*" >&2; }
@@ -42,4 +44,28 @@ if [[ "$role" == server && -n "$data" ]]; then
   fi
   install -d -m 0700 "$data"
   bind "$data" /var/lib/rancher/k3s/server
+fi
+
+# A server's Traefik believes the X-Forwarded-* headers on its port 80 (kvbox #219). kvbox's edge ends
+# TLS and the host passes the request on with the visitor's name as Host, X-Forwarded-Proto: https and
+# the visitor's address; Traefik drops such headers from a sender it does not trust, and an app behind it
+# would then see plain http from the host's address (wrong redirects, wrong logs). Port 80 of a server is
+# reached only by its host and by the cluster's own boxes and pods, never from outside, so every sender
+# is trusted. k3s applies whatever is in its manifests directory at each start; written before every
+# start, so a cluster made before this has it from its next one.
+if [[ "$role" == server ]]; then
+  manifests=/var/lib/rancher/k3s/server/manifests
+  install -d -m 0700 "$manifests"
+  cat > "$manifests/kvbox-traefik.yaml.tmp" <<'YAML'
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    additionalArguments:
+      - "--entryPoints.web.forwardedHeaders.insecure=true"
+YAML
+  mv "$manifests/kvbox-traefik.yaml.tmp" "$manifests/kvbox-traefik.yaml"
 fi
