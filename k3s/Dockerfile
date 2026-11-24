@@ -36,6 +36,10 @@ RUN case "$(uname -m)" in \
 COPY rootfs/ /
 RUN chmod 0755 /usr/local/sbin/kvbox-k3s-init /usr/local/sbin/kvbox-k3s-mounts /usr/local/sbin/kvbox-k3s-run \
        /usr/local/sbin/kvbox-k3s-status /usr/local/sbin/kvbox-k3s-kubeconfig /usr/local/sbin/kvbox-k3s-drain \
+       /usr/local/sbin/kvbox-k3s-rotate \
     && chmod 0644 /etc/kvbox/image.json /etc/systemd/system/k3s.service /etc/systemd/system/kvbox-k3s-init.service \
+       /etc/systemd/system/kvbox-k3s-api.socket /etc/systemd/system/kvbox-k3s-api.service \
        /etc/sysctl.d/60-kvbox-k3s.conf \
+    # The public API port's forwarder and what kvbox-k3s-rotate makes certificate authorities with.
+    && test -x /usr/lib/systemd/systemd-socket-proxyd && command -v openssl >/dev/null \
     && systemctl enable k3s.service kvbox-k3s-init.service

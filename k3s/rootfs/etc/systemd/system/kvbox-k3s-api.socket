@@ -1,0 +1,14 @@
+# The Kubernetes API alone, for the outside (kvbox #230, v0.1.5). Port 6443 of a server is two things at
+# once: the Kubernetes API and k3s's own door, where a token joins a node and the server's token changes
+# the cluster's certificate authorities. What kvbox publishes on the host is this port instead: it leads
+# to the API server's own port (6444, which listens on localhost only) and to nothing of k3s's. Port 6443
+# stays where the cluster's own boxes reach it. Enabled by kvbox-k3s-init on a server, never on an agent.
+[Unit]
+Description=kvbox: the Kubernetes API alone on port 6445 (for the outside)
+
+[Socket]
+ListenStream=6445
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

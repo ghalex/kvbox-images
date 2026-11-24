@@ -3,6 +3,7 @@
   "scripts": {
     "status": "/usr/local/sbin/kvbox-k3s-status",
     "kubeconfig": "/usr/local/sbin/kvbox-k3s-kubeconfig",
-    "drain": "/usr/local/sbin/kvbox-k3s-drain"
+    "drain": "/usr/local/sbin/kvbox-k3s-drain",
+    "rotate": "/usr/local/sbin/kvbox-k3s-rotate"
   }
 }

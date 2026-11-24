@@ -7,7 +7,12 @@
 # written its configuration (k3s.service is skipped while /etc/rancher/k3s/config.yaml is missing).
 #
 #   K3S_ROLE      server | agent
-#   K3S_TOKEN     the cluster's join token, the same on every box of it
+#   K3S_TOKEN     an agent: what it joins with. A server: its own token, which no other box is given
+#                 (with it comes the whole cluster: k3s lets its holder replace the cluster's
+#                 certificate authorities)
+#   K3S_AGENT_TOKEN  server only, optional: what agents join with (k3s's agent-token), so they hold
+#                 something that joins a node and nothing more (kvbox #230, v0.1.5). Without it
+#                 agents join with the server's own token, as before
 #   K3S_URL       agent only: the server's address, https://<name or address>:6443
 #   K3S_TLS_SAN   server only, optional: more names or addresses for the API's certificate, comma
 #                 separated (the public address kubectl uses from outside)
@@ -16,7 +21,8 @@
 #
 # So: wait for the variables, check them, write /etc/kvbox/k3s.conf (role and data directory, read by
 # kvbox-k3s-mounts and kvbox-k3s-run) and /etc/rancher/k3s/config.yaml, start k3s.service, wait until
-# it is up and write the marker. A server only runs the system's own pods: once k3s has installed
+# it is up and write the marker. A server also opens port 6445 (kvbox-k3s-api.socket): the Kubernetes API
+# alone, for the outside. A server only runs the system's own pods: once k3s has installed
 # Traefik there, the node gets the taint CriticalAddonsOnly=true:NoExecute.
 # The node's name is the box's name. Every step is idempotent, so an interrupted run is redone at the
 # next boot. With a variable missing or wrong nothing is written: a later boot that has it retries.
@@ -62,7 +68,7 @@ unquote() {
   printf '%s' "$out"
 }
 
-ROLE="" TOKEN="" URL="" TLS_SAN="" DATA=""
+ROLE="" TOKEN="" AGENT_TOKEN="" URL="" TLS_SAN="" DATA=""
 if [[ -r "$ENV_FILE" ]]; then
   re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -70,6 +76,7 @@ if [[ -r "$ENV_FILE" ]]; then
     case "${BASH_REMATCH[1]}" in
       K3S_ROLE)    ROLE="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_TOKEN)   TOKEN="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_AGENT_TOKEN) AGENT_TOKEN="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_URL)     URL="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_TLS_SAN) TLS_SAN="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_DATA)    DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
@@ -95,8 +102,16 @@ if [[ "$ROLE" == agent ]]; then
     log "K3S_URL=\"$URL\" is not the server's address (https://<name or address>:6443); k3s not started, retrying at next boot"
     exit 1
   fi
-  DATA=""
+  DATA="" AGENT_TOKEN=""
 else
+  if [[ -n "$AGENT_TOKEN" && ! "$AGENT_TOKEN" =~ $re_token ]]; then
+    log "K3S_AGENT_TOKEN is shorter than 8 characters or has something other than letters, digits and . _ : ~ + / = @ -; k3s not started, retrying at next boot"
+    exit 1
+  fi
+  if [[ -n "$AGENT_TOKEN" && "$AGENT_TOKEN" == "$TOKEN" ]]; then
+    log "K3S_AGENT_TOKEN is the server's own token: agents would hold the whole cluster; k3s not started, retrying at next boot"
+    exit 1
+  fi
   if [[ -n "$TLS_SAN" ]]; then
     re_san='^[A-Za-z0-9]([A-Za-z0-9.:-]*[A-Za-z0-9])?$'
     IFS=',' read -r -a sans <<< "$TLS_SAN"
@@ -144,12 +159,19 @@ printf 'ROLE=%s\nDATA=%s\n' "$ROLE" "$DATA" | write_file "$CONF"
   if [[ "$ROLE" == agent ]]; then
     echo "server: \"$URL\""
   else
+    [[ -n "$AGENT_TOKEN" ]] && echo "agent-token: \"$AGENT_TOKEN\""
     if (( ${#sans[@]} > 0 )); then
       echo "tls-san:"
       for san in "${sans[@]}"; do echo "  - \"$san\""; done
     fi
   fi
 } | write_file "$K3S_CONF"
+
+# The Kubernetes API alone on port 6445, for the outside (kvbox #230): port 6443 is also k3s's own door for
+# joining nodes and stays inside the cluster. Enabled here, so only a server has it, at every boot from now on.
+if [[ "$ROLE" == server ]]; then
+  systemctl enable --now kvbox-k3s-api.socket >/dev/null 2>&1 || log "could not open port 6445 (kvbox-k3s-api.socket): the API is not reachable from outside until it is"
+fi
 
 systemctl restart --no-block k3s.service
 

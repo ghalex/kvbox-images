@@ -1,0 +1,17 @@
+# Started by kvbox-k3s-api.socket at the first connection: every connection to port 6445 is passed, byte
+# for byte, to the API server's own port. TLS is the API server's (its certificate carries the box's
+# K3S_TLS_SAN names and is signed by the CA a kubeconfig trusts), so client certificates work as on 6443.
+# While k3s is down a connection is refused, like 6443's.
+[Unit]
+Description=kvbox: the Kubernetes API alone on port 6445 (for the outside)
+Requires=kvbox-k3s-api.socket
+After=kvbox-k3s-api.socket
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:6444
+DynamicUser=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+Restart=on-failure

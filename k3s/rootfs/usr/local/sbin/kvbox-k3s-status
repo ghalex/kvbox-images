@@ -3,7 +3,7 @@
 # /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
 #
 #   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true,
-#    "ingress": true,
+#    "ingress": true, "certificatesEndAt": "2027-11-24T10:00:00Z",
 #    "nodes": [{"name": "prod-a1", "ready": true, "schedulable": true, "roles": [], "version": "v1.37.2+k3s1",
 #               "address": "172.30.0.12", "volumes": 2, "claims": ["default/data-pg-0", "default/cache"]}]}
 #
@@ -13,6 +13,11 @@
 # accepting   server: the API answers ready; agent: k3s is running and has joined
 # ingress     server only, absent while not accepting: Traefik is installed and has a pod available, so
 #             the cluster answers on ports 80 and 443
+# certificatesEndAt   server only (v0.1.5), absent when none could be read: when the first of k3s's own
+#             certificates ends (the API's, the admin's a kubeconfig carries, the ones its parts talk
+#             to each other with). They last a year and k3s renews them only when it starts within 120
+#             days of that, so a server that never restarts runs out; its certificate authorities
+#             (ten years) are not counted
 # nodes       server only, absent while not accepting: every node the cluster knows, the server itself
 #             included. schedulable is false for a cordoned node; roles are the node-role labels
 #             ("control-plane" on the server); volumes counts the bound persistent volumes kept on
@@ -20,6 +25,8 @@
 #             claims names them (v0.1.2): the claim each is bound to as namespace/name, or the volume's
 #             own name when it has none. Absent as a whole when the nodes or their volumes could not be
 #             listed (v0.1.3): a count of 0 is never a guess
+import datetime
+import glob
 import json
 import os
 import re
@@ -29,6 +36,7 @@ MARKER = "/var/lib/kvbox/k3s-init.done"
 CONF = "/etc/kvbox/k3s.conf"
 KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
 K3S = "/usr/local/bin/k3s"
+TLS_DIR = "/var/lib/rancher/k3s/server/tls"
 ROLE_LABEL = "node-role.kubernetes.io/"
 HOSTNAME_KEYS = ("kubernetes.io/hostname", "metadata.name")
 
@@ -49,6 +57,28 @@ def version():
         return None
     m = re.search(r"k3s version (\S+)", out)
     return m.group(1) if m else None
+
+
+def certificates_end():
+    """When the first of the server's certificates ends, as 2027-11-24T10:00:00Z; None when none could be read.
+    A file's first certificate is the one that counts (the rest of a file is its CA's chain); the CAs
+    themselves last ten years and are left out."""
+    first = None
+    for path in glob.glob(os.path.join(TLS_DIR, "*.crt")):
+        if path.endswith("-ca.crt"):
+            continue
+        try:
+            out = subprocess.run(["openssl", "x509", "-noout", "-enddate", "-in", path], capture_output=True, text=True, timeout=5,
+                                 env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}).stdout
+            m = re.search(r"notAfter=(.+?) GMT", out)
+            if not m:
+                continue
+            end = datetime.datetime.strptime(" ".join(m.group(1).split()), "%b %d %H:%M:%S %Y")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        if first is None or end < first:
+            first = end
+    return first.strftime("%Y-%m-%dT%H:%M:%SZ") if first else None
 
 
 def kubectl(*args):
@@ -128,6 +158,9 @@ def main():
     if v:
         out["version"] = v
     if r == "server":
+        ends = certificates_end()
+        if ends:
+            out["certificatesEndAt"] = ends
         out["accepting"] = (kubectl("get", "--raw", "/readyz") or "").strip() == "ok"
         if out["accepting"]:
             out["ingress"] = ingress()

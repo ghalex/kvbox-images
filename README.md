@@ -429,7 +429,8 @@ is what kvbox's managed Kubernetes is made of.
   "scripts": {
     "status": "/usr/local/sbin/kvbox-k3s-status",
     "kubeconfig": "/usr/local/sbin/kvbox-k3s-kubeconfig",
-    "drain": "/usr/local/sbin/kvbox-k3s-drain"
+    "drain": "/usr/local/sbin/kvbox-k3s-drain",
+    "rotate": "/usr/local/sbin/kvbox-k3s-rotate"
   }
 }
 ```
@@ -447,7 +448,8 @@ wrong nothing is written and the next boot retries.
 | Variable | For | Meaning |
 |---|---|---|
 | `K3S_ROLE` | both | `server` or `agent` |
-| `K3S_TOKEN` | both | the cluster's join token, the same on every box of it (8+ characters of letters, digits and `. _ : ~ + / = @ -`) |
+| `K3S_TOKEN` | both | an agent: what it joins with. A server: its own token, which no other box should be given, since with it comes the whole cluster (8+ characters of letters, digits and `. _ : ~ + / = @ -`) |
+| `K3S_AGENT_TOKEN` | server, optional | what agents join with (k3s's `agent-token`, v0.1.5): a token that joins a node and nothing more. Without it agents join with the server's own token |
 | `K3S_URL` | agent | the server's address, `https://<name or address>:6443` |
 | `K3S_TLS_SAN` | server, optional | more names or addresses for the API's certificate, comma separated: the public address `kubectl` uses from outside |
 | `K3S_DATA` | server, optional | a directory on a volume (`/mnt/<volume>/…`, a bare `/mnt/<volume>` becomes `/mnt/<volume>/k3s`) for the cluster's state; without it the state is on the box's own disk |
@@ -475,17 +477,28 @@ wrong nothing is written and the next boot retries.
   (kvbox #219). That port is reached only by the box's host and the cluster's
   own boxes and pods.
 
+- A server also listens on port 6445 (`kvbox-k3s-api.socket`, enabled by the
+  init on a server only, v0.1.5): the Kubernetes API alone, passed byte for
+  byte to the API server's own port (6444, localhost only), for publishing
+  outside. Port 6443 is the API and k3s's own door at once (a token joins a
+  node there, the server's token replaces the cluster's certificate
+  authorities) and is meant for the cluster's own boxes. A kubeconfig works on
+  either: the certificate is signed by the same authority and carries the
+  `K3S_TLS_SAN` names.
+
 The scripts take one JSON object and answer one; `kubeconfig` and `drain` are
 for the server.
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{"ready", "role", "version", "accepting", "ingress", "nodes"}`; `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2); `nodes` is absent when the nodes or their volumes could not be listed (v0.1.3) |
+| `status` | none | `{"ready", "role", "version", "accepting", "certificatesEndAt", "ingress", "nodes"}`; `certificatesEndAt` on a server (v0.1.5): when the first of k3s's own certificates ends (they last a year and are renewed only when k3s starts within 120 days of that); `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2); `nodes` is absent when the nodes or their volumes could not be listed (v0.1.3) |
 | `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |
 | `drain` | `{"op": "delete", "node"}` | `{"node", "state": "done"}`; the node out of the cluster at once, nothing waited for (v0.1.2): a drain of it is stopped and the node object deleted, for a node whose box goes whatever its pods say |
 | `drain` | `{"op": "stop", "node"}` | `{"node", "state"}`: a drain given up (v0.1.3): its unit stopped before it deletes the node, which stays cordoned (`idle`, or `done` when the cluster no longer knows it) |
+| `rotate` | server: `{"token", "agentToken"}` | `{"rotated": true, "role": "server"}` (v0.1.5): the server's token replaced (`k3s token rotate`), both tokens written to `config.yaml`, new certificate authorities stored (`k3s certificate rotate-ca --force`). Nothing takes effect before k3s starts again: the caller restarts the box. Every certificate from before, a saved kubeconfig's included, then stops being believed. Service account tokens are not touched. Safe to ask again after a failure |
+| `rotate` | agent: `{"token"}` | `{"rotated": true, "role": "agent"}`: the token it joins with at its next start |
 
 When something is wrong, the box's journal says what: `journalctl -u
 kvbox-k3s-init` and `journalctl -u k3s`. Needs kernel `v6.1.190-3` or later.
