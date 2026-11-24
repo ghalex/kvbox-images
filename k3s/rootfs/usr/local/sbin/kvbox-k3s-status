@@ -5,7 +5,7 @@
 #   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true,
 #    "ingress": true, "certificatesEndAt": "2027-11-24T10:00:00Z",
 #    "nodes": [{"name": "prod-a1", "ready": true, "schedulable": true, "roles": [], "version": "v1.37.2+k3s1",
-#               "address": "172.30.0.12", "volumes": 2, "claims": ["default/data-pg-0", "default/cache"]}]}
+#               "address": "172.30.0.12", "bootId": "5f2c…", "volumes": 2, "claims": ["default/data-pg-0", "default/cache"]}]}
 #
 # ready       kvbox-k3s-init has finished: k3s has its role and configuration and came up once
 # role        server or agent (absent before the init has read the box's variables)
@@ -25,6 +25,8 @@
 #             claims names them (v0.1.2): the claim each is bound to as namespace/name, or the volume's
 #             own name when it has none. Absent as a whole when the nodes or their volumes could not be
 #             listed (v0.1.3): a count of 0 is never a guess
+#             bootId (v0.1.5) is the node's kubelet's boot id, new at every boot of its box: a Ready under
+#             the id from before a restart is the node's word from before it, not that it came back
 import datetime
 import glob
 import json
@@ -138,6 +140,10 @@ def nodes():
         }
         if address:
             entry["address"] = address
+        # A new one at every boot of the node's box: a Ready condition under the same id is from before a restart.
+        boot_id = status.get("nodeInfo", {}).get("bootID")
+        if boot_id:
+            entry["bootId"] = boot_id
         result.append(entry)
     return sorted(result, key=lambda n: n["name"])
 
