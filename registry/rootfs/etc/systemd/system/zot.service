@@ -1,0 +1,22 @@
+# zot, once kvbox-registry-init has written its configuration and its password (kvbox #234): before that
+# the unit is skipped at boot and the init starts it, so it never listens without a password. The images
+# live on a volume, so never before the volumes are mounted; RequiresMountsFor is not used because the
+# path is only known from /etc/zot/config.json, and kvbox-registry-init refuses a volume that is not mounted.
+[Unit]
+Description=zot (kvbox container registry)
+ConditionPathExists=/etc/zot/config.json
+ConditionPathExists=/etc/zot/htpasswd
+After=network.target kvbox-volumes.service
+
+[Service]
+User=zot
+Group=zot
+ExecStart=/usr/local/bin/zot serve /etc/zot/config.json
+Restart=always
+RestartSec=2
+TimeoutStopSec=120
+LimitNOFILE=65536
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

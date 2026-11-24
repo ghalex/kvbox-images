@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# kvbox-registry-init (kvbox #234): give zot its password and its data directory, once per box. Run by
+# kvbox-registry-init.service at every boot; once the marker exists it exits at once.
+#
+# The host sends REGISTRY_PASSWORD (generated when the owner gave none, see /etc/kvbox/image.json) and
+# optionally REGISTRY_DATA through kvbox-agent's "env" a few seconds after boot; the agent writes
+# /etc/kvbox/env and touches /run/kvbox/env-ready. zot does not run before this script has written
+# /etc/zot/config.json and /etc/zot/htpasswd (zot.service is skipped without them), so it never
+# listens without a password. So: wait for the variables, read them, then
+#   - the data directory: REGISTRY_DATA (a directory on a volume, /mnt/<volume>/…) or /var/lib/zot on
+#     the box's own disk. The volume must be mounted; when it is not (it is attached after the box was
+#     made) nothing is done and the next boot retries;
+#   - write /etc/zot/htpasswd: the one login, user `kvbox`, the password kept only as a bcrypt hash.
+#     It is on the box's own disk, not with the images: a volume restored from a backup keeps the
+#     password the registry has now;
+#   - write /etc/zot/config.json and start zot.service, wait until it takes that login, write the marker.
+# Every step is idempotent, so an interrupted run is simply redone at the next boot. Without a password
+# nothing is done and no marker is written: a later boot that has one retries.
+set -euo pipefail
+
+ENV_FILE=/etc/kvbox/env
+READY=/run/kvbox/env-ready
+MARKER=/var/lib/kvbox/registry-init.done
+CONF_DIR=/etc/zot
+DEFAULT_DATA=/var/lib/zot
+USER_NAME=kvbox
+PORT=5000
+WAIT_ENV=300      # seconds for the host's env push
+WAIT_SERVER=120   # seconds for the server to answer
+
+log() { echo "kvbox-registry-init: $*" >&2; }
+
+[[ -e "$MARKER" ]] && { log "already done ($MARKER)"; exit 0; }
+
+for ((i = 0; i < WAIT_ENV; i++)); do
+  [[ -e "$READY" ]] && break
+  sleep 1
+done
+if [[ ! -e "$READY" ]]; then
+  log "gave up: no environment from the host after ${WAIT_ENV}s ($READY missing); zot not started, retrying at next boot"
+  exit 1
+fi
+
+# /etc/kvbox/env is written by kvbox-agent for systemd's EnvironmentFile=: one NAME="value" per
+# line, with `\` written as `\\` and `"` as `\"`, nothing else escaped, no newlines in values.
+# Parsed here, never sourced: a value is data, not shell.
+unquote() {
+  local s="$1" out="" c
+  while [[ -n "$s" ]]; do
+    c="${s:0:1}"
+    if [[ "$c" == "\\" && ${#s} -ge 2 ]]; then
+      out+="${s:1:1}"; s="${s:2}"
+    else
+      out+="$c"; s="${s:1}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+PASSWORD="" DATA=""
+if [[ -r "$ENV_FILE" ]]; then
+  re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      REGISTRY_PASSWORD) PASSWORD="$(unquote "${BASH_REMATCH[2]}")" ;;
+      REGISTRY_DATA)     DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+if [[ -z "$PASSWORD" ]]; then
+  log "REGISTRY_PASSWORD is empty or missing in $ENV_FILE: zot is not started without a password; retrying at next boot"
+  exit 1
+fi
+# bcrypt reads the first 72 bytes of a password and ignores the rest: a longer one would be weaker than it looks.
+if (( $(printf '%s' "$PASSWORD" | wc -c) > 72 )); then
+  log "REGISTRY_PASSWORD is longer than 72 bytes; nothing done"
+  exit 1
+fi
+
+if [[ -n "$DATA" ]]; then
+  # /mnt/<volume>[/<path>]: only a mounted volume, never the box's own disk under an unmounted /mnt/<volume>.
+  re_data='^/mnt/([A-Za-z0-9][A-Za-z0-9._-]*)(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+  if [[ ! "$DATA" =~ $re_data ]]; then
+    log "REGISTRY_DATA=\"$DATA\" is not a directory on a volume (/mnt/<volume>/<directory>); nothing done"
+    exit 1
+  fi
+  volume="/mnt/${BASH_REMATCH[1]}"
+  if ! mountpoint -q "$volume"; then
+    log "REGISTRY_DATA is on $volume, which is not mounted: the volume is not attached yet; retrying at next boot"
+    exit 1
+  fi
+  # On a volume the files sit one level down, so the server never starts on the empty mount point of a detached volume.
+  [[ "$DATA" == "$volume" ]] && DATA="$volume/registry"
+else
+  DATA="$DEFAULT_DATA"
+fi
+
+install -d -m 0700 -o zot -g zot "$DATA"
+
+# A file is written beside its place and renamed, so the server never reads half of one. Readable by
+# zot's group only: the hash of the password is not for every user of the box.
+write_conf() { # <file>, content on stdin
+  local tmp="$1.tmp"
+  (umask 077 && cat > "$tmp")
+  chown root:zot "$tmp"
+  chmod 0640 "$tmp"
+  mv "$tmp" "$1"
+}
+
+# The password reaches htpasswd on stdin (-i), never argv; -B is bcrypt, the one hash zot takes.
+printf '%s' "$PASSWORD" | htpasswd -niB "$USER_NAME" | grep -v '^$' | write_conf "$CONF_DIR/htpasswd"
+
+# $DATA has only [A-Za-z0-9._/-] (checked above), so it needs no escaping.
+#   - readTimeout / writeTimeout: zot's own are 60 s for a whole request, and docker sends a layer as
+#     one request: a layer that takes longer to upload would be cut. An hour, as kvbox's edge gives.
+#   - gc: what no tag names any more (a deleted tag, an upload never finished) is removed while zot
+#     runs, an hour after it was last needed, so a push in progress never loses a layer it just sent.
+#   - dedupe: a layer two repositories share is stored once.
+#   - plain HTTP on every address: kvbox's edge ends TLS, and nothing reaches the box but through it
+#     or a link.
+write_conf "$CONF_DIR/config.json" <<JSON
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "$DATA",
+    "dedupe": true,
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "1h",
+    "retention": { "delay": "1h" }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "$PORT",
+    "realm": "kvbox registry",
+    "readTimeout": "1h",
+    "writeTimeout": "1h",
+    "auth": { "htpasswd": { "path": "$CONF_DIR/htpasswd" }, "failDelay": 1 }
+  },
+  "log": { "level": "warn" }
+}
+JSON
+
+systemctl restart zot.service
+
+# 200 with the login: the server is up and has read the password.
+answers() {
+  REGISTRY_PASSWORD="$PASSWORD" python3 - "$USER_NAME" "$PORT" <<'PY'
+import base64, os, sys, urllib.request
+token = base64.b64encode(f"{sys.argv[1]}:{os.environ['REGISTRY_PASSWORD']}".encode()).decode()
+req = urllib.request.Request(f"http://127.0.0.1:{sys.argv[2]}/v2/", headers={"Authorization": "Basic " + token})
+try:
+    with urllib.request.urlopen(req, timeout=5) as res:
+        sys.exit(0 if res.status == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+up=""
+for ((i = 0; i < WAIT_SERVER; i++)); do
+  if answers; then up=1; break; fi
+  sleep 1
+done
+if [[ -z "$up" ]]; then
+  log "gave up: zot not answering with its password after ${WAIT_SERVER}s (journalctl -u zot); retrying at next boot"
+  exit 1
+fi
+
+install -d -m 0755 "$(dirname "$MARKER")"
+: > "$MARKER"
+log "done: zot answers on port $PORT with its password, images in $DATA"

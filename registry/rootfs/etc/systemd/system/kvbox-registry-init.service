@@ -1,0 +1,13 @@
+# The password from the box owner's REGISTRY_PASSWORD, the data directory from REGISTRY_DATA and zot's
+# configuration (kvbox #234), once per box: with the marker there it exits at once. Not a oneshot, so
+# waiting for the host's env push never holds up the boot.
+[Unit]
+Description=kvbox: the registry's password, data directory and configuration
+After=kvbox-agent.service kvbox-volumes.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/kvbox-registry-init
+
+[Install]
+WantedBy=multi-user.target

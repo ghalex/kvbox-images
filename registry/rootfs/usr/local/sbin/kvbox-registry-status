@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# kvbox-registry-status (kvbox #234): what a registry shows about itself. Named as "status" in
+# /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
+#
+#   {"ready": true, "accepting": true, "version": "2.1.23", "user": "kvbox",
+#    "storage": {"usedBytes": 2254857, "totalBytes": 21474836480},
+#    "repositories": [{"name": "myapp", "tags": 3}, {"name": "team/api", "tags": 12}]}
+#
+# ready         kvbox-registry-init has finished: the server has its password and its data directory
+# accepting     the server answers on its port (it asks for the login: 401 without one)
+# version       zot's own version
+# user          the one login's user name
+# storage       the filesystem holding the images: the volume when REGISTRY_DATA is set
+# repositories  every repository with how many tags it has, by name; read from the data directory
+#               (each is an OCI image layout), so it needs no password. At most MAX_REPOSITORIES, and
+#               `repositoriesTruncated: true` when there are more.
+import json
+import os
+import re
+import subprocess
+import urllib.error
+import urllib.request
+
+MARKER = "/var/lib/kvbox/registry-init.done"
+CONF = "/etc/zot/config.json"
+URL = "http://127.0.0.1:5000/v2/"
+USER = "kvbox"
+MAX_REPOSITORIES = 1000
+TAG = "org.opencontainers.image.ref.name"
+
+
+def version():
+    try:
+        r = subprocess.run(["zot", "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    m = re.search(r"v(\d+\.\d+\.\d+)", r.stdout)
+    return m.group(1) if m else ""
+
+
+def accepting():
+    try:
+        with urllib.request.urlopen(URL, timeout=5) as res:
+            return res.status == 200
+    except urllib.error.HTTPError as err:
+        return err.code == 401
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def data_directory():
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            return json.load(f)["storage"]["rootDirectory"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def storage(path):
+    try:
+        fs = os.statvfs(path)
+    except OSError:
+        return None
+    return {"usedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize, "totalBytes": fs.f_blocks * fs.f_frsize}
+
+
+def tags(repo_dir):
+    try:
+        with open(os.path.join(repo_dir, "index.json"), encoding="utf-8") as f:
+            manifests = json.load(f).get("manifests") or []
+    except (OSError, ValueError, AttributeError):
+        return 0
+    return len({(m.get("annotations") or {}).get(TAG) for m in manifests if isinstance(m, dict)} - {None})
+
+
+def repositories(root):
+    """(list, truncated): a directory holding `oci-layout` is a repository, named by its path under the root."""
+    found, truncated = [], False
+    for path, dirs, files in os.walk(root):
+        dirs.sort()
+        if "oci-layout" in files:
+            dirs[:] = []  # nothing below a repository is another one (blobs/, .uploads/)
+            if len(found) >= MAX_REPOSITORIES:
+                truncated = True
+                break
+            found.append({"name": os.path.relpath(path, root), "tags": tags(path)})
+        else:
+            dirs[:] = [d for d in dirs if not d.startswith((".", "_"))]
+    return found, truncated
+
+
+def main():
+    out = {"ready": os.path.exists(MARKER), "accepting": accepting(), "version": version(), "user": USER}
+    data = data_directory()
+    if data:
+        space = storage(data)
+        if space:
+            out["storage"] = space
+        try:
+            out["repositories"], truncated = repositories(data)
+            if truncated:
+                out["repositoriesTruncated"] = True
+        except OSError:
+            pass
+    print(json.dumps(out))
+
+
+main()

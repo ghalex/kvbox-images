@@ -1,0 +1,8 @@
+{
+  "autoHibernate": false,
+  "generate": ["REGISTRY_PASSWORD"],
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-registry-status",
+    "password": "/usr/local/sbin/kvbox-registry-password"
+  }
+}

@@ -11,6 +11,7 @@ published as GitHub releases of this repo and downloaded by kvbox's
 | `postgres/` | `postgres-vX.Y.Z` | Everything in `base` plus PostgreSQL 18 and pgvector from the PostgreSQL project's apt repository (PGDG), listening on every address with its own TLS certificate, password (scram-sha-256) logins from anywhere; the role, database, password and optionally a data directory on a volume come from the box's environment (see [The postgres image](#the-postgres-image)) |
 | `redis/` | `redis-vX.Y.Z` | Everything in `base` plus [Valkey](https://valkey.io) 9.1 (BSD, speaks the Redis protocol) from the Valkey project's own build for Ubuntu 24.04, plain on 6379 and TLS on 6380 with its own certificate, append-only file persistence; the password and optionally a data directory on a volume come from the box's environment (see [The redis image](#the-redis-image)) |
 | `garage/` | `garage-vX.Y.Z` | Everything in `base` plus [Garage](https://garagehq.deuxfleurs.fr) 2.5 (AGPL, speaks the S3 protocol) from the Garage project's own static build, one node on port 3900 (S3) and 3902 (public buckets, no signature) with its data on a volume; what kvbox's Object Storage runs on (see [The garage image](#the-garage-image)) |
+| `registry/` | `registry-vX.Y.Z` | Everything in `base` plus [zot](https://zotregistry.dev) 2.1 (Apache 2.0, an OCI registry: `docker push` and `docker pull`) from the zot project's own static build, on port 5000 behind one login, its images on a volume; what kvbox's container registry runs on (see [The registry image](#the-registry-image)) |
 | `k3s/` | `k3s-vX.Y.Z` | Everything in `base` plus [k3s](https://k3s.io) 1.37 (Apache 2.0, Kubernetes) from the k3s project's own release, with the images it needs to come up baked in; one image for a cluster's server and its nodes, the role and the join token come from the box's environment; what kvbox's managed Kubernetes runs on (see [The k3s image](#the-k3s-image)) |
 | `gh-runner/` | `gh-runner-vX.Y.Z` | Everything in `base` plus GitHub's Actions runner in `/home/kvbox/actions-runner` and `xz-utils zstd unzip zip jq`; registered at first boot from the box's environment (see [The gh-runner image](#the-gh-runner-image)) |
 | `android/` | `android-vX.Y.Z` | Everything in `base` plus Java 17, Maven, the Android SDK's command-line tools, platform-tools (adb) and build-tools, Appium with the UiAutomator2 driver; Android itself runs as a [Redroid](https://github.com/remote-android/redroid-doc) container started at boot. Boots the android kernel (see [The android image](#the-android-image)) |
@@ -337,6 +338,72 @@ dot, so a name with one is always a host name. Garage has no per-object or
 per-prefix permission: public is the whole bucket. Logs: `journalctl -u
 kvbox-garage-init` and `journalctl -u garage`.
 
+## The registry image
+
+`registry/` (kvbox issue #234) is `FROM kvbox-base:local` plus zot, an OCI
+container registry: the project's static "minimal" build (the registry alone,
+without the search, UI and mirroring extensions;
+`github.com/project-zot/zot/releases/download/v<version>/zot-linux-<arch>-minimal`),
+the version and both checksums pinned in the Dockerfile (`ZOT_VERSION`), plus
+`apache2-utils` for `htpasswd`. The server runs as the user `zot` from
+`zot.service`. It is what kvbox's container registry runs on: one box per
+account, hidden from the user, reached at an HTTPS name through kvbox's edge.
+
+```json
+{
+  "autoHibernate": false,
+  "generate": ["REGISTRY_PASSWORD"],
+  "scripts": {
+    "status": "/usr/local/sbin/kvbox-registry-status",
+    "password": "/usr/local/sbin/kvbox-registry-password"
+  }
+}
+```
+
+Nothing listens until the box has a password: `zot.service` is skipped while
+`/etc/zot/config.json` or `/etc/zot/htpasswd` is missing.
+`kvbox-registry-init.service` runs at every boot. Until
+`/var/lib/kvbox/registry-init.done` exists it waits for `/run/kvbox/env-ready`,
+reads `REGISTRY_PASSWORD` and `REGISTRY_DATA` from `/etc/kvbox/env` (parsed,
+never sourced), then
+
+- takes `REGISTRY_DATA=/mnt/<volume>[/<directory>]` on a mounted volume (a bare
+  `/mnt/<volume>` becomes `/mnt/<volume>/registry`), or `/var/lib/zot` on the
+  box's own disk when it is not sent; when the volume is not mounted nothing is
+  done and the next boot retries;
+- writes `/etc/zot/htpasswd`: the one login, user `kvbox`, the password as a
+  bcrypt hash (so at most 72 bytes). It is on the box's own disk, not with the
+  images: a volume restored from a backup keeps the password the registry has
+  now;
+- writes `/etc/zot/config.json` and starts the server: port 5000 on every
+  address, plain HTTP (kvbox's edge ends TLS); `readTimeout` and `writeTimeout`
+  of one hour, because zot's own 60 seconds are for a whole request and docker
+  sends a layer as one request; a layer two repositories share stored once
+  (`dedupe`); what no tag names any more removed while the server runs, an hour
+  after it was last needed (`gc`, `gcDelay`, `gcInterval`), so deleting a tag
+  gives its space back without a restart;
+- waits until the server takes the login, then writes the marker.
+
+Each script takes one JSON object and prints one (the kvbox-agent `script`
+contract):
+
+| Script | Input | Output |
+|---|---|---|
+| `status` | none | `{ready, accepting, version, user, storage: {usedBytes, totalBytes}, repositories: [{name, tags}], repositoriesTruncated?}`; the repositories are read from the data directory (at most 1000), so no password is needed |
+| `password` | `{"password"}` | `{"user"}`; rewrites `/etc/zot/htpasswd`, which zot watches: the new password works within seconds with no restart, the old one stops. Answers once a login with the new one works, and puts the old file back if it never does |
+
+A client first asks without a login and must get zot's own `401` with its
+`WWW-Authenticate: Basic` header: nothing in front of the box may answer in its
+place. One upload request may last as long as the layer takes, so whatever is
+in front must allow that too (kvbox's edge and hosts give an hour; a Traefik in
+front of the edge needs its entry point's `readTimeout` raised to match).
+Logs: `journalctl -u kvbox-registry-init` and `journalctl -u zot` (warnings and
+errors only).
+
+```
+kvbox new cr --base registry
+```
+
 ## The redis image
 
 `redis/` (kvbox issue #176) is `FROM kvbox-base:local` plus Valkey, the BSD
@@ -590,6 +657,7 @@ postgres/build.sh             # -> postgres/out/rootfs.ext4; builds base's Docke
 redis/build.sh                # -> redis/out/rootfs.ext4; same
 gh-runner/build.sh            # -> gh-runner/out/rootfs.ext4; same
 k3s/build.sh                  # -> k3s/out/rootfs.ext4; same
+registry/build.sh             # -> registry/out/rootfs.ext4; same
 android/build.sh              # -> android/out/rootfs.ext4 (10 GiB sparse); same
 kernel/build.sh               # -> kernel/out/vmlinux (several minutes the first time, cached after)
 kernel-android/build.sh       # -> kernel-android/out/vmlinux: the same plus kernel/android.config
@@ -613,6 +681,7 @@ KVBOX_IMAGES_DIR=~/projects/kvbox-images ./install-server.sh
 ./release.sh postgres v0.1.0    # builds, then publishes release postgres-v0.1.0 (rootfs-postgres-<arch>.ext4.zst)
 ./release.sh redis v0.1.0       # builds, then publishes release redis-v0.1.0 (rootfs-redis-<arch>.ext4.zst)
 ./release.sh k3s v0.1.0         # builds, then publishes release k3s-v0.1.0 (rootfs-k3s-<arch>.ext4.zst)
+./release.sh registry v0.1.0    # builds, then publishes release registry-v0.1.0 (rootfs-registry-<arch>.ext4.zst)
 ./release.sh kernel v6.1.190-1  # builds, then publishes release kernel-v6.1.190-1
 ./release.sh android v0.1.0     # builds, then publishes release android-v0.1.0 (rootfs-android-<arch>.ext4.zst)
 ./release.sh kernel-android v6.1.190-1  # builds, then publishes release kernel-android-v6.1.190-1 (vmlinux-android-<arch>)

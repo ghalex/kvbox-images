@@ -4,6 +4,7 @@
 #   ./release.sh base v0.1.0        # -> release "base-v0.1.0" with rootfs-base-<arch>.ext4.zst + .sha256
 #   ./release.sh postgres v0.1.0    # -> release "postgres-v0.1.0" with rootfs-postgres-<arch>.ext4.zst + .sha256
 #   ./release.sh redis v0.1.0       # -> release "redis-v0.1.0" with rootfs-redis-<arch>.ext4.zst + .sha256
+#   ./release.sh registry v0.1.0    # -> release "registry-v0.1.0" with rootfs-registry-<arch>.ext4.zst + .sha256
 #   ./release.sh k3s v0.1.0         # -> release "k3s-v0.1.0" with rootfs-k3s-<arch>.ext4.zst + .sha256
 #   ./release.sh kernel v6.1.190-1  # -> release "kernel-v6.1.190-1" with vmlinux-<arch> + .sha256
 #   ./release.sh kernel-android v6.1.190-1  # -> release "kernel-android-v6.1.190-1" with vmlinux-android-<arch> + .sha256
@@ -89,6 +90,8 @@ case "$image" in
           how="kvbox new cache --base redis" ;;
   garage) what="Garage guest image $version ($arch): the base image plus Garage $(docker run --rm kvbox-garage:local garage --version | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p' | head -n 1) (the Garage project's own build, speaks the S3 protocol), one node on port 3900 with its data on a volume from GARAGE_DATA and its S3 region from GARAGE_REGION; scripts make buckets and their access keys. What kvbox's Object Storage runs on (kvbox #182)."
           how="kvbox bucket create uploads" ;;
+  registry) what="Registry guest image $version ($arch): the base image plus zot $(docker run --rm kvbox-registry:local zot --version 2>&1 | sed -n 's/.*"commit":"v\([0-9][0-9.]*\).*/\1/p' | head -n 1) (the zot project's own minimal build, an OCI registry for docker push and pull) on port 5000 behind one login (user kvbox, password from the box's REGISTRY_PASSWORD), its images on a volume with REGISTRY_DATA; scripts for its status and a new password. What kvbox's container registry runs on (kvbox #234)."
+          how="kvbox new cr --base registry" ;;
   k3s)    what="k3s guest image $version ($arch): the base image plus k3s $(docker run --rm kvbox-k3s:local k3s --version | sed -n 's/^k3s version \([^ ]*\).*/\1/p') (the k3s project's own release) with the images it needs to come up baked in; server or agent from the box's K3S_ROLE, the join token from K3S_TOKEN, a server's state on a volume with K3S_DATA; scripts for the kubeconfig, the nodes and draining one. What kvbox's managed Kubernetes runs on (kvbox #214)."
           how="./install-server.sh --update" ;;
   android) what="Android guest image $version ($arch): the base image plus Java 17, Maven, the Android SDK (platform-tools, build-tools) and Appium $(docker run --rm kvbox-android:local appium --version) with the UiAutomator2 driver; Android runs as a Redroid container started at boot, adb on localhost:5600. Boots the android kernel (kernel-android, binder)."
