@@ -551,6 +551,18 @@ wrong nothing is written and the next boot retries.
   cannot resolve a linked database's `<name>.<slug>.kvbox`. k3s writes that
   ConfigMap at each start, so a key added to it by hand does not last.
 
+- Pods send packets of at most 1290 bytes (v0.1.7, kvbox #226). A cluster's
+  nodes may be on several hosts, and the road between two hosts is a WireGuard
+  tunnel with an MTU of 1340; flannel's VXLAN wraps each packet in 50 bytes
+  more and would size itself by the box's own interface (pods at 1450), so a
+  full packet would be lost on the way to another host. The init writes
+  `/etc/rancher/k3s/flannel.json`, what k3s writes for flannel itself plus
+  `"MTU": 1340` in the VXLAN backend (the wrapped packet's size: flannel gives
+  the pods 50 less), and names it as `flannel-conf` in `config.yaml`, on the
+  server and on every agent, whether or not the cluster ever leaves one host.
+  The number is `NODE_MTU` in `kvbox-k3s-init`; the file also names k3s's
+  default pod network, `10.42.0.0/16`. A box set up by an earlier version
+  keeps 1450: the init runs once per box.
 - A server also listens on port 6445 (`kvbox-k3s-api.socket`, enabled by the
   init on a server only, v0.1.5): the Kubernetes API alone, passed byte for
   byte to the API server's own port (6444, localhost only), for publishing
@@ -565,7 +577,7 @@ for the server.
 
 | Script | Input | Output |
 |---|---|---|
-| `status` | none | `{"ready", "role", "version", "accepting", "certificatesEndAt", "ingress", "nodes"}`; `certificatesEndAt` on a server (v0.1.5): when the first of k3s's own certificates ends (they last a year and are renewed only when k3s starts within 120 days of that); `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "bootId", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2), `bootId` the kubelet's boot id, new at every boot of the node (v0.1.5); `nodes` is absent when the nodes or their volumes could not be listed (v0.1.3) |
+| `status` | none | `{"ready", "role", "version", "accepting", "podMtu", "certificatesEndAt", "ingress", "nodes"}`; `podMtu` (v0.1.7): the largest packet this box's pods send, as flannel set it up at this boot, 1290 on a box set up by v0.1.7 or later and 1450 on one from before, absent until flannel is up; `certificatesEndAt` on a server (v0.1.5): when the first of k3s's own certificates ends (they last a year and are renewed only when k3s starts within 120 days of that); `ingress` (Traefik has a pod available) and `nodes` on a server whose API answers: `{"name", "ready", "schedulable", "roles", "version", "address", "bootId", "volumes", "claims"}` each, `volumes` the bound persistent volumes kept on that node's disk and `claims` their claims as `namespace/name` (v0.1.2), `bootId` the kubelet's boot id, new at every boot of the node (v0.1.5); `nodes` is absent when the nodes or their volumes could not be listed (v0.1.3) |
 | `kubeconfig` | `{"address", "port", "name"?}` | `{"kubeconfig"}`: the admin kubeconfig with the server set to that address and port; `name` renames the cluster, user and context (k3s calls them `default`) |
 | `drain` | `{"op": "start", "node"}` | `{"node", "state"}`; cordons the node, moves its pods away and deletes the node object, in the background (a drain outlasts a script): `draining`, or `done` for a node the cluster does not know |
 | `drain` | `{"op": "state", "node"}` | `{"node", "state", "error"?}`: `draining`, `done` (the node object is gone), `failed` with `error` (start again), `idle` |

@@ -20,7 +20,8 @@
 #                 state; without it the state is on the box's own disk
 #
 # So: wait for the variables, check them, write /etc/kvbox/k3s.conf (role and data directory, read by
-# kvbox-k3s-mounts and kvbox-k3s-run) and /etc/rancher/k3s/config.yaml, start k3s.service, wait until
+# kvbox-k3s-mounts and kvbox-k3s-run), /etc/rancher/k3s/flannel.json (the pods' network, with packets
+# small enough for the road between hosts, kvbox #226) and /etc/rancher/k3s/config.yaml, start k3s.service, wait until
 # it is up and write the marker. A server also opens port 6445 (kvbox-k3s-api.socket): the Kubernetes API
 # alone, for the outside. A server only runs the system's own pods: once k3s has installed
 # Traefik there, the node gets the taint CriticalAddonsOnly=true:NoExecute.
@@ -33,6 +34,19 @@ READY=/run/kvbox/env-ready
 MARKER=/var/lib/kvbox/k3s-init.done
 CONF=/etc/kvbox/k3s.conf
 K3S_CONF=/etc/rancher/k3s/config.yaml
+FLANNEL_CONF=/etc/rancher/k3s/flannel.json
+# The largest packet a node sends to another node for its pods (kvbox #226, v0.1.7). A cluster's nodes may
+# be on several hosts, and between two hosts the road is a WireGuard tunnel (kvmesh) whose MTU is 1340.
+# The pods' network is flannel's VXLAN, which wraps each packet in 50 bytes more and, left alone, sizes
+# itself by the box's own interface (1500, so pods at 1450): a full packet would not fit the tunnel, and
+# what wraps it is UDP, so the hosts' TCP MSS rule never sees inside. flannel takes this number as the
+# wrapped packet's size and gives the pods 50 less: 1290 on flannel.1, cni0 and in every pod. Every box
+# of a cluster, the server too, on one host or several: one number, the same on all, nothing to change
+# when a cluster first gets a node on another host. Change it only with the hosts' tunnel MTU.
+NODE_MTU=1340
+# k3s's own default for pods (cluster-cidr), which this image never changes: with a flannel file of our
+# own, k3s no longer writes it there itself.
+POD_NETWORK=10.42.0.0/16
 WAIT_ENV=300   # seconds for the host's env push
 WAIT_K3S=600   # seconds for k3s to be up (a first start unpacks the baked images)
 WAIT_INSTALL=300   # seconds for k3s's own install jobs on a server
@@ -152,10 +166,27 @@ install -d -m 0755 /etc/rancher/k3s
 # $DATA has only [A-Za-z0-9._/-] (checked above), so the file needs no quoting.
 printf 'ROLE=%s\nDATA=%s\n' "$ROLE" "$DATA" | write_file "$CONF"
 
+# What k3s would write for flannel itself (agent/etc/flannel/net-conf.json), plus the backend's MTU. k3s
+# has no option for that number alone; with flannel-conf it reads this file as it is, on a server and
+# on an agent alike.
+write_file "$FLANNEL_CONF" <<JSON
+{
+  "Network": "$POD_NETWORK",
+  "EnableIPv4": true,
+  "EnableIPv6": false,
+  "IPv6Network": "::/0",
+  "Backend": {
+    "Type": "vxlan",
+    "MTU": $NODE_MTU
+  }
+}
+JSON
+
 {
   echo "# kvbox-k3s-init: this box's part in its cluster, from the box's K3S_* variables"
   echo "token: \"$TOKEN\""
   echo "node-name: \"$(hostname)\""
+  echo "flannel-conf: \"$FLANNEL_CONF\""
   if [[ "$ROLE" == agent ]]; then
     echo "server: \"$URL\""
   else

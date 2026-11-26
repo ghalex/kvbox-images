@@ -2,7 +2,7 @@
 # kvbox-k3s-status (kvbox #214): what a box of a cluster shows about itself. Named as "status" in
 # /etc/kvbox/image.json; the host runs it through kvbox-agent's "script" and passes the JSON on.
 #
-#   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true,
+#   {"ready": true, "role": "server", "version": "v1.37.2+k3s1", "accepting": true, "podMtu": 1290,
 #    "ingress": true, "certificatesEndAt": "2027-11-24T10:00:00Z",
 #    "nodes": [{"name": "prod-a1", "ready": true, "schedulable": true, "roles": [], "version": "v1.37.2+k3s1",
 #               "address": "172.30.0.12", "bootId": "5f2c…", "volumes": 2, "claims": ["default/data-pg-0", "default/cache"]}]}
@@ -11,6 +11,10 @@
 # role        server or agent (absent before the init has read the box's variables)
 # version     k3s's own version, from the binary
 # accepting   server: the API answers ready; agent: k3s is running and has joined
+# podMtu      (v0.1.7) the largest packet this box's pods send, as flannel set it up at this boot (absent
+#             until it has): 1290 on a box set up by v0.1.7 or later, which fits the road between two
+#             hosts (kvbox #226); 1450 on one from before, whose cluster cannot have a node on another
+#             host. A server says its own, and every box of its cluster was set up the same way
 # ingress     server only, absent while not accepting: Traefik is installed and has a pod available, so
 #             the cluster answers on ports 80 and 443
 # certificatesEndAt   server only (v0.1.5), absent when none could be read: when the first of k3s's own
@@ -39,6 +43,7 @@ CONF = "/etc/kvbox/k3s.conf"
 KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
 K3S = "/usr/local/bin/k3s"
 TLS_DIR = "/var/lib/rancher/k3s/server/tls"
+FLANNEL_ENV = "/run/flannel/subnet.env"
 ROLE_LABEL = "node-role.kubernetes.io/"
 HOSTNAME_KEYS = ("kubernetes.io/hostname", "metadata.name")
 
@@ -59,6 +64,17 @@ def version():
         return None
     m = re.search(r"k3s version (\S+)", out)
     return m.group(1) if m else None
+
+
+def pod_mtu():
+    """The MTU flannel gave this box's pods (it writes the file once its network is up, at every start of k3s);
+    None before that."""
+    try:
+        with open(FLANNEL_ENV, encoding="utf-8") as f:
+            m = re.search(r"^FLANNEL_MTU=(\d+)$", f.read(), re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
 
 
 def certificates_end():
@@ -163,6 +179,9 @@ def main():
     v = version()
     if v:
         out["version"] = v
+    mtu = pod_mtu()
+    if mtu:
+        out["podMtu"] = mtu
     if r == "server":
         ends = certificates_end()
         if ends:
