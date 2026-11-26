@@ -12,6 +12,8 @@
 #       mounted: when it is not, this fails and k3s is not started.
 #   /var/lib/rancher/k3s/server/manifests/kvbox-traefik.yaml   on a server: Traefik trusts the
 #       forwarded headers kvbox's edge sends (kvbox #219).
+#   /var/lib/rancher/k3s/server/manifests/kvbox-dns.yaml   on a server: the cluster's DNS asks the
+#       box's host, and only it, for a name under .kvbox (kvbox #243).
 set -euo pipefail
 
 log() { echo "kvbox-k3s-mounts: $*" >&2; }
@@ -68,4 +70,35 @@ spec:
       - "--entryPoints.web.forwardedHeaders.insecure=true"
 YAML
   mv "$manifests/kvbox-traefik.yaml.tmp" "$manifests/kvbox-traefik.yaml"
+fi
+
+# A server's CoreDNS asks the box's host for every name under .kvbox (kvbox #243): `<name>.<slug>.kvbox`
+# is how a pod names a database or box the cluster is linked to (`kvbox k8s link`). CoreDNS ends with
+# `forward . /etc/resolv.conf`, and the box's resolv.conf lists its host first, then public resolvers
+# (the host answers nothing but .kvbox). libc tries those in order; CoreDNS picks one at random, so two
+# times in three a public resolver said the name does not exist, and CoreDNS kept that answer. This
+# server block takes .kvbox out of that: k3s's CoreDNS imports every `*.server` key of the ConfigMap
+# `coredns-custom`. The host is the first nameserver of the box's own resolv.conf, read at every start.
+# The ConfigMap is k3s's to write from here on: a key added to it by hand is lost at the next start.
+if [[ "$role" == server ]]; then
+  resolver="$(awk '$1 == "nameserver" { print $2; exit }' /etc/resolv.conf)"
+  if [[ "$resolver" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    cat > "$manifests/kvbox-dns.yaml.tmp" <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  kvbox.server: |
+    kvbox:53 {
+        errors
+        cache 30
+        forward . $resolver
+    }
+YAML
+    mv "$manifests/kvbox-dns.yaml.tmp" "$manifests/kvbox-dns.yaml"
+  else
+    log "no nameserver in /etc/resolv.conf: pods will not resolve names under .kvbox"
+  fi
 fi

@@ -543,6 +543,13 @@ wrong nothing is written and the next boot retries.
   `https` and the visitor's address when kvbox's edge ends TLS for the cluster
   (kvbox #219). That port is reached only by the box's host and the cluster's
   own boxes and pods.
+- On a server it also writes `server/manifests/kvbox-dns.yaml` (v0.1.6, kvbox
+  #243): the ConfigMap `coredns-custom` with one server block, `kvbox:53`, that
+  forwards every name under `.kvbox` to the box's host (the first nameserver of
+  the box's `/etc/resolv.conf`) and nowhere else. Without it CoreDNS spreads
+  such a lookup over the box's three resolvers, two of them public, and a pod
+  cannot resolve a linked database's `<name>.<slug>.kvbox`. k3s writes that
+  ConfigMap at each start, so a key added to it by hand does not last.
 
 - A server also listens on port 6445 (`kvbox-k3s-api.socket`, enabled by the
   init on a server only, v0.1.5): the Kubernetes API alone, passed byte for
