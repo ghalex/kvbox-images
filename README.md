@@ -520,6 +520,7 @@ wrong nothing is written and the next boot retries.
 | `K3S_URL` | agent | the server's address, `https://<name or address>:6443` |
 | `K3S_TLS_SAN` | server, optional | more names or addresses for the API's certificate, comma separated: the public address `kubectl` uses from outside |
 | `K3S_DATA` | server, optional | a directory on a volume (`/mnt/<volume>/…`, a bare `/mnt/<volume>` becomes `/mnt/<volume>/k3s`) for the cluster's state; without it the state is on the box's own disk |
+| `K3S_NODE_LABELS` | agent, optional | labels for the node (v0.1.8, kvbox #235), comma separated `key=value`: kvbox sends `kvbox.sh/pool=<the node's pool>` |
 
 - The node's name is the box's name.
 - A server gets the taint `CriticalAddonsOnly=true:NoExecute`: only the
@@ -563,6 +564,18 @@ wrong nothing is written and the next boot retries.
   The number is `NODE_MTU` in `kvbox-k3s-init`; the file also names k3s's
   default pod network, `10.42.0.0/16`. A box set up by an earlier version
   keeps 1450: the init runs once per box.
+- An agent takes its node's labels from `K3S_NODE_LABELS` (v0.1.8, kvbox
+  #235): each `key=value` becomes a `node-label` entry of `config.yaml`, so a
+  workload picks a pool with `nodeSelector: {kvbox.sh/pool: <pool>}`. Each is
+  checked as Kubernetes would (a key is `[<prefix>/]<name>`, name and value at
+  most 63 of letters, digits and `- _ .` that begin and end with a letter or
+  digit, the value may be empty); one that is not a label, a key under
+  `kubernetes.io` or `k8s.io` (the kubelet refuses to start with most of
+  those) and a key named twice are said in the log and left out, and k3s
+  starts all the same: a bad label never keeps a node out of its cluster. k3s
+  gives a node its labels only when it first registers, which is enough for a
+  pool's name: a node is of one pool for life. A server ignores the variable,
+  and so does an image from before v0.1.8: its nodes have no label.
 - A server also listens on port 6445 (`kvbox-k3s-api.socket`, enabled by the
   init on a server only, v0.1.5): the Kubernetes API alone, passed byte for
   byte to the API server's own port (6444, localhost only), for publishing

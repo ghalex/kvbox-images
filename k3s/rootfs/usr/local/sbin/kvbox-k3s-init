@@ -18,6 +18,10 @@
 #                 separated (the public address kubectl uses from outside)
 #   K3S_DATA      server only, optional: a directory on a volume (/mnt/<volume>/…) for the cluster's
 #                 state; without it the state is on the box's own disk
+#   K3S_NODE_LABELS  agent only, optional (kvbox #235, v0.1.8): labels for this node, comma separated
+#                 key=value (kvbox sends kvbox.sh/pool=<the node's pool>, so a workload picks a pool
+#                 with a nodeSelector). One that is not a Kubernetes label is said in the log and left
+#                 out: a bad label never keeps a node out of its cluster. A server ignores it
 #
 # So: wait for the variables, check them, write /etc/kvbox/k3s.conf (role and data directory, read by
 # kvbox-k3s-mounts and kvbox-k3s-run), /etc/rancher/k3s/flannel.json (the pods' network, with packets
@@ -82,7 +86,7 @@ unquote() {
   printf '%s' "$out"
 }
 
-ROLE="" TOKEN="" AGENT_TOKEN="" URL="" TLS_SAN="" DATA=""
+ROLE="" TOKEN="" AGENT_TOKEN="" URL="" TLS_SAN="" DATA="" NODE_LABELS=""
 if [[ -r "$ENV_FILE" ]]; then
   re='^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$'
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -94,6 +98,7 @@ if [[ -r "$ENV_FILE" ]]; then
       K3S_URL)     URL="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_TLS_SAN) TLS_SAN="$(unquote "${BASH_REMATCH[2]}")" ;;
       K3S_DATA)    DATA="$(unquote "${BASH_REMATCH[2]}")" ;;
+      K3S_NODE_LABELS) NODE_LABELS="$(unquote "${BASH_REMATCH[2]}")" ;;
     esac
   done < "$ENV_FILE"
 fi
@@ -153,6 +158,44 @@ else
   fi
 fi
 
+# The node's labels (kvbox #235, v0.1.8), each checked as Kubernetes would: a key is [<prefix>/]<name>, the
+# name and the value at most 63 of letters, digits and - _ . that begin and end with a letter or digit
+# (a value may be empty), the prefix a DNS name of at most 253. What passes has nothing that needs
+# escaping in a YAML double-quoted string. A key under kubernetes.io or k8s.io is left out too: the
+# kubelet refuses to start with most of those, and none is this variable's business. Anything left out is
+# only said in the log, and k3s starts without it.
+labels=()
+if [[ -n "$NODE_LABELS" ]]; then
+  if [[ "$ROLE" == server ]]; then
+    log "K3S_NODE_LABELS is for an agent; a server takes no labels from it, ignored"
+  else
+    re_name='^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$'
+    re_prefix='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
+    re_kept='(^|\.)(kubernetes|k8s)\.io$'
+    seen=","
+    IFS=',' read -r -a asked <<< "$NODE_LABELS"
+    for label in "${asked[@]}"; do
+      [[ -z "$label" ]] && continue
+      key="${label%%=*}" value="" prefix="" name=""
+      [[ "$label" == *=* ]] && value="${label#*=}"
+      name="${key##*/}"
+      [[ "$key" == */* ]] && prefix="${key%/*}"
+      if [[ "$label" != *=* || ! "$name" =~ $re_name ]] ||
+         [[ "$key" == */* && ( ${#prefix} -gt 253 || ! "$prefix" =~ $re_prefix ) ]] ||
+         [[ -n "$value" && ! "$value" =~ $re_name ]]; then
+        log "K3S_NODE_LABELS has \"$label\", which is not a Kubernetes label (key=value); left out"
+      elif [[ "$prefix" =~ $re_kept ]]; then
+        log "K3S_NODE_LABELS has \"$label\", under a prefix Kubernetes keeps for itself; left out"
+      elif [[ "$seen" == *",$key,"* ]]; then
+        log "K3S_NODE_LABELS names $key twice; the first one stays"
+      else
+        labels+=("$label")
+        seen+="$key,"
+      fi
+    done
+  fi
+fi
+
 # A file is written beside its place and renamed, so k3s never reads half of one.
 write_file() { # <file>, content on stdin
   local tmp="$1.tmp"
@@ -189,6 +232,12 @@ JSON
   echo "flannel-conf: \"$FLANNEL_CONF\""
   if [[ "$ROLE" == agent ]]; then
     echo "server: \"$URL\""
+    # k3s gives a node these only when it first registers, never again at a later start. That is enough:
+    # a node is of one pool for life, and this file is written once per box.
+    if (( ${#labels[@]} > 0 )); then
+      echo "node-label:"
+      for label in "${labels[@]}"; do echo "  - \"$label\""; done
+    fi
   else
     [[ -n "$AGENT_TOKEN" ]] && echo "agent-token: \"$AGENT_TOKEN\""
     if (( ${#sans[@]} > 0 )); then
