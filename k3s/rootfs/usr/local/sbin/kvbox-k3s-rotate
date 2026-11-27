@@ -28,6 +28,15 @@
 # are stored, and step 3 is run with a data directory that holds it. When that is refused too (k3s has
 # started again since, or the old token was never kept), the token on disk is tried; when nothing is
 # taken, k3s is started again here, which takes longer than a script may, and the same request finishes it.
+#
+# Before step 1 (v0.1.11): the agents' new token is written into k3s's password file (server/cred/passwd,
+# the line of user "node") by this script. k3s keeps a copy of that file in its datastore and takes one
+# only when a token is rotated; at every start it writes the agents' token of its configuration into the
+# file. With a new agent-token in the configuration alone, the first start after a rotation changed the
+# file and not the copy, and the start after that refused to run at all ("passwd newer than datastore and
+# could cause a cluster outage"): a rotated cluster lost its server at its next restart. Written first,
+# the copy step 1 takes already holds it and no later start changes the file. The file's time is left as
+# it was, so a k3s that started between the two would take the datastore's copy back, not refuse.
 # Not rotated: the key service account tokens are
 # signed with (every pod would lose its API access until restarted), so a token made inside the cluster
 # stays good; whoever rotates because of a person looks at the cluster's service accounts too.
@@ -56,6 +65,8 @@ SERVER_TOKEN = "/var/lib/rancher/k3s/server/token"
 ROTATED = "/var/lib/kvbox/k3s-rotated"
 # The token file as it was before the server's token was replaced: what the running k3s still asks for.
 OLD_TOKEN = SERVER_TOKEN + ".before-rotate"
+# k3s's users and their passwords, one per line: <password>,<user>,<uid>,<groups>. "node" is what an agent joins as.
+PASSWD = "/var/lib/rancher/k3s/server/cred/passwd"
 RUN_DIR = "/run/kvbox"
 # As kvbox-k3s-init takes them: what needs no escaping in a YAML double-quoted string.
 TOKEN_RE = r"[A-Za-z0-9._:~+/=@-]{8,}"
@@ -155,6 +166,31 @@ def new_authorities(directory):
         os.chmod(key, 0o600)
 
 
+def set_agent_password(agent):
+    """
+    The agents' token as the password of user "node" in k3s's password file, the file's time kept. True when
+    the file already had it. The tokens this script takes need no quoting in a CSV line (TOKEN_RE has no comma or quote).
+    """
+    with open(PASSWD, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    at = next((i for i, line in enumerate(lines) if line.split(",")[1:2] == ["node"]), None)
+    if at is None:
+        raise OSError("k3s's password file has no line for its agents")
+    fields = lines[at].split(",")
+    if fields[0] == agent:
+        return True
+    before = os.stat(PASSWD)
+    fields[0] = agent
+    lines[at] = ",".join(fields)
+    tmp = PASSWD + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(tmp, PASSWD)
+    return False
+
+
 def keep_old_token():
     """A copy of the token file as it is now, for the k3s that is running; one kept by an earlier run stays (it is the older)."""
     if os.path.exists(OLD_TOKEN):
@@ -192,6 +228,10 @@ def server(data):
         fail("rotate: the agents' token must not be the server's own")
     if not os.path.exists(SERVER_TOKEN):
         fail("k3s has not started on this server yet")
+    try:
+        set_agent_password(agent)
+    except (OSError, IndexError) as err:
+        fail(f"could not write the agents' new token into k3s's password file: {err}")
     if server_token() != token:
         try:
             keep_old_token()
