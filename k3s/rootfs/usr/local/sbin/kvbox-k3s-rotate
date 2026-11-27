@@ -18,7 +18,15 @@
 #
 # In that order: k3s's token rotation writes the certificate authorities it runs with back to the
 # datastore, so it must come before the new ones are stored. Each step is safe to do again, so a run that
-# stopped half-way is finished by the same request. Not rotated: the key service account tokens are
+# stopped half-way is finished by the same request.
+#
+# Between the two (v0.1.9): k3s writes the new token to disk at once, but the k3s that is running goes on
+# asking callers for the old one until it starts again, and "k3s certificate rotate-ca" takes its token
+# from the data directory alone. So the old token file is kept beside the new one until the authorities
+# are stored, and step 3 is run with a data directory that holds it. When that is refused too (k3s has
+# started again since, or the old token was never kept), the token on disk is tried; when nothing is
+# taken, k3s is started again here, which takes longer than a script may, and the same request finishes it.
+# Not rotated: the key service account tokens are
 # signed with (every pod would lose its API access until restarted), so a token made inside the cluster
 # stays good; whoever rotates because of a person looks at the cluster's service accounts too.
 #
@@ -41,6 +49,8 @@ K3S = "/usr/local/bin/k3s"
 CONF = "/etc/kvbox/k3s.conf"
 K3S_CONF = "/etc/rancher/k3s/config.yaml"
 SERVER_TOKEN = "/var/lib/rancher/k3s/server/token"
+# The token file as it was before the server's token was replaced: what the running k3s still asks for.
+OLD_TOKEN = SERVER_TOKEN + ".before-rotate"
 RUN_DIR = "/run/kvbox"
 # As kvbox-k3s-init takes them: what needs no escaping in a YAML double-quoted string.
 TOKEN_RE = r"[A-Za-z0-9._:~+/=@-]{8,}"
@@ -140,6 +150,35 @@ def new_authorities(directory):
         os.chmod(key, 0o600)
 
 
+def keep_old_token():
+    """A copy of the token file as it is now, for the k3s that is running; one kept by an earlier run stays (it is the older)."""
+    if os.path.exists(OLD_TOKEN):
+        return
+    with open(SERVER_TOKEN, encoding="utf-8") as f:
+        text = f.read()
+    fd = os.open(OLD_TOKEN + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(OLD_TOKEN + ".tmp", OLD_TOKEN)
+
+
+def store_authorities(directory):
+    """
+    The new authorities into the datastore, as whoever the running k3s believes: the token from before
+    first (a data directory of its own holding only that), then the one on disk. The last complaint, or None.
+    """
+    problem = None
+    if os.path.exists(OLD_TOKEN):
+        old = os.path.join(directory, "old")
+        os.makedirs(os.path.join(old, "server"), mode=0o700)
+        shutil.copyfile(OLD_TOKEN, os.path.join(old, "server", "token"))
+        os.chmod(os.path.join(old, "server", "token"), 0o600)
+        problem = run(K3S, "certificate", "rotate-ca", "--force", "--path", directory, "--data-dir", old)
+        if problem is None:
+            return None
+    return run(K3S, "certificate", "rotate-ca", "--force", "--path", directory)
+
+
 def server(data):
     token, agent = data.get("token"), data.get("agentToken")
     if not isinstance(token, str) or not re.fullmatch(TOKEN_RE, token) or not isinstance(agent, str) or not re.fullmatch(TOKEN_RE, agent):
@@ -149,6 +188,10 @@ def server(data):
     if not os.path.exists(SERVER_TOKEN):
         fail("k3s has not started on this server yet")
     if server_token() != token:
+        try:
+            keep_old_token()
+        except OSError as err:
+            fail(f"could not keep the server's token from before: {err}")
         problem = run(K3S, "token", "rotate", "--new-token", token)
         if problem:
             fail(f"could not replace the server's token (is k3s up?): {problem}")
@@ -158,11 +201,20 @@ def server(data):
     directory = tempfile.mkdtemp(prefix="k3s-rotate-", dir=RUN_DIR)
     try:
         new_authorities(directory)
-        problem = run(K3S, "certificate", "rotate-ca", "--force", "--path", directory)
+        problem = store_authorities(directory)
         if problem:
+            if "not authorized" in problem:
+                # The running k3s knows neither token this box has: only one that has started again takes the new one.
+                subprocess.run(["systemctl", "restart", "--no-block", "k3s.service"], capture_output=True, timeout=10, check=False)
+                fail("the tokens are new, the certificate authorities are not: k3s is starting again to take its new token. The same request again in a minute finishes it")
             fail(f"the tokens are new, the certificate authorities are not: {problem}. The same request again finishes it")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+    # The next k3s takes the new token: the one from before opens nothing more.
+    try:
+        os.unlink(OLD_TOKEN)
+    except OSError:
+        pass
     return {"rotated": True, "role": "server"}
 
 
