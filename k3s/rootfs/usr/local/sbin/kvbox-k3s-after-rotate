@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# kvbox-k3s-after-rotate (kvbox #245, v0.1.10): on a cluster's server, once at the first start after
+# kvbox-k3s-rotate stored new certificate authorities. Run by kvbox-k3s-after-rotate.service while the
+# marker kvbox-k3s-rotate leaves is there.
+#
+# A pod believes the API server by the authority Kubernetes hands it as a file (the ConfigMap
+# kube-root-ca.crt). After a rotation that file is the old authority until Kubernetes has published the
+# new one, a moment after k3s is up; the system's own pods start again with the box before that. One that
+# exits when the API refuses it reads the file again at its next start and gets through. CoreDNS does not
+# exit: it goes on asking with the old authority, never becomes ready, and no name inside the cluster
+# resolves any more. So: wait for the API, wait until kube-root-ca.crt in kube-system is the authority
+# k3s now runs with, then start the system's deployments again (kube-system: CoreDNS, Traefik,
+# metrics-server, the local path provisioner), so each begins with the new one. Then the marker goes.
+#
+# Only kube-system: what the owner deployed is theirs to restart (one that talks to the Kubernetes API
+# and does not exit on the error needs it too; the docs say so). A run that gives up keeps the marker and
+# is tried again at the next boot.
+set -euo pipefail
+
+MARKER=/var/lib/kvbox/k3s-rotated
+SERVER_CA=/var/lib/rancher/k3s/server/tls/server-ca.crt
+WAIT_K3S=600      # seconds for k3s to be up
+WAIT_PUBLISH=180  # seconds for Kubernetes to publish the new authority to kube-system
+
+log() { echo "kvbox-k3s-after-rotate: $*" >&2; }
+kubectl() { k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml --request-timeout=10s "$@"; }
+# What tells one authority from another, whatever the file's spacing: the certificate's fingerprint.
+print() { openssl x509 -noout -fingerprint -sha256 2>/dev/null; }
+
+up() { [[ "$(kubectl get --raw /readyz 2>/dev/null)" == ok ]]; }
+for ((i = 0; i < WAIT_K3S; i += 2)); do
+  up && break
+  sleep 2
+done
+if ! up; then
+  log "gave up: k3s not up after ${WAIT_K3S}s; the next boot tries again"
+  exit 1
+fi
+
+published() {
+  local want have
+  want="$(print < "$SERVER_CA")" || return 1
+  have="$(kubectl -n kube-system get configmap kube-root-ca.crt -o 'jsonpath={.data.ca\.crt}' 2>/dev/null | print)" || return 1
+  [[ -n "$want" && "$want" == "$have" ]]
+}
+for ((i = 0; i < WAIT_PUBLISH; i += 2)); do
+  published && break
+  sleep 2
+done
+# Late or not, the pods are started again: one that still gets the old authority is no worse off than before.
+published || log "kube-root-ca.crt does not carry the new authority after ${WAIT_PUBLISH}s; starting the system's pods again all the same"
+
+if ! kubectl -n kube-system rollout restart deployment >/dev/null; then
+  log "could not start the system's deployments again (kubectl -n kube-system rollout restart deployment); the next boot tries again"
+  exit 1
+fi
+rm -f "$MARKER"
+log "the system's deployments were started again with the new certificate authority"

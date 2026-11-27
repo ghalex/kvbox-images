@@ -1,0 +1,15 @@
+# Once after a rotation of the cluster's credentials (kvbox #245): the system's pods are started again
+# so they believe the new certificate authority; without it CoreDNS never comes back. Skipped unless
+# kvbox-k3s-rotate left its marker, so only a server ever runs it. Not a oneshot: it waits for k3s and
+# never holds up the boot.
+[Unit]
+Description=kvbox: start the cluster's system pods again after new certificate authorities (once)
+ConditionPathExists=/var/lib/kvbox/k3s-rotated
+After=k3s.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/kvbox-k3s-after-rotate
+
+[Install]
+WantedBy=multi-user.target

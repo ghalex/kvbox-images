@@ -14,7 +14,9 @@
 #   3. new certificate authorities are made (server, client, request-header: self-signed, as k3s makes
 #      its own) and stored with k3s certificate rotate-ca --force. At its next start k3s issues every
 #      certificate again under them, the admin's in the kubeconfig included; a certificate from before,
-#      a saved kubeconfig for one, is no longer believed.
+#      a saved kubeconfig for one, is no longer believed;
+#   4. a marker is left (v0.1.10), by which kvbox-k3s-after-rotate starts the system's pods again once
+#      at the server's next start: they would go on believing the old authority, and CoreDNS for good.
 #
 # In that order: k3s's token rotation writes the certificate authorities it runs with back to the
 # datastore, so it must come before the new ones are stored. Each step is safe to do again, so a run that
@@ -49,6 +51,9 @@ K3S = "/usr/local/bin/k3s"
 CONF = "/etc/kvbox/k3s.conf"
 K3S_CONF = "/etc/rancher/k3s/config.yaml"
 SERVER_TOKEN = "/var/lib/rancher/k3s/server/token"
+# Left once new authorities are stored: at the server's next start kvbox-k3s-after-rotate starts the system's
+# pods again, so they believe the new authority (v0.1.10; CoreDNS never comes back by itself).
+ROTATED = "/var/lib/kvbox/k3s-rotated"
 # The token file as it was before the server's token was replaced: what the running k3s still asks for.
 OLD_TOKEN = SERVER_TOKEN + ".before-rotate"
 RUN_DIR = "/run/kvbox"
@@ -210,6 +215,12 @@ def server(data):
             fail(f"the tokens are new, the certificate authorities are not: {problem}. The same request again finishes it")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+    try:
+        os.makedirs(os.path.dirname(ROTATED), mode=0o755, exist_ok=True)
+        with open(ROTATED, "w", encoding="utf-8"):
+            pass
+    except OSError as err:
+        fail(f"the certificate authorities are new, but the note to start the system's pods again could not be written: {err}. The same request again finishes it")
     # The next k3s takes the new token: the one from before opens nothing more.
     try:
         os.unlink(OLD_TOKEN)
