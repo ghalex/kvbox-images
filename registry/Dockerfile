@@ -32,6 +32,6 @@ RUN case "$(uname -m)" in \
     && zot --version 2>&1 | grep -q "v$ZOT_VERSION"
 
 COPY rootfs/ /
-RUN chmod 0755 /usr/local/sbin/kvbox-registry-init /usr/local/sbin/kvbox-registry-status /usr/local/sbin/kvbox-registry-password \
+RUN chmod 0755 /usr/local/sbin/kvbox-registry-init /usr/local/sbin/kvbox-registry-status /usr/local/sbin/kvbox-registry-tags /usr/local/sbin/kvbox-registry-password \
     && chmod 0644 /etc/kvbox/image.json /etc/systemd/system/zot.service /etc/systemd/system/kvbox-registry-init.service \
     && systemctl enable zot.service kvbox-registry-init.service

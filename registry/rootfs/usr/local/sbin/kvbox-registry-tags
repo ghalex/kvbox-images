@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+# kvbox-registry-tags (kvbox #234): the tags of one repository. Named as "tags" in /etc/kvbox/image.json;
+# the host runs it through kvbox-agent's "script" with one JSON line on stdin:
+#
+#   {"repository": "team/api"}
+#     ->  {"repository": "team/api",
+#          "tags": [{"name": "v1.4.0", "digest": "sha256:9f2c…", "pushedAt": "2026-11-28T09:14:03Z",
+#                    "sizeBytes": 48211034, "platforms": ["linux/amd64", "linux/arm64"]}]}
+#
+# tags       the newest first. Read from the repository's OCI image layout in the data directory, so it
+#            needs no password. At most MAX_TAGS, and `tagsTruncated: true` when there are more.
+# digest     what the tag names: an image, or an index of images (one per platform).
+# pushedAt   when that image came into the registry (its manifest's file). A tag moved onto an image that
+#            was already here keeps that image's time.
+# sizeBytes  what a pull downloads at most: the image's config and layers, compressed; for an index, of
+#            every platform together. Absent when a manifest cannot be read.
+# platforms  os/architecture of each image; absent when the image does not say.
+# A repository that is not there is an error ("no repository …").
+import datetime
+import json
+import os
+import re
+import sys
+
+CONF = "/etc/zot/config.json"
+MAX_TAGS = 1000
+TAG = "org.opencontainers.image.ref.name"
+# What zot takes as a repository's name: lower-case path components, never `.` or `..` alone.
+NAME_RE = r"^[a-z0-9]+([._-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$"
+INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
+
+
+def fail(msg):
+    print(f"kvbox-registry-tags: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def blob_path(repo_dir, digest):
+    algo, _, value = str(digest).partition(":")
+    if not re.fullmatch(r"[a-z0-9]+", algo) or not re.fullmatch(r"[a-f0-9]+", value):
+        return None
+    return os.path.join(repo_dir, "blobs", algo, value)
+
+
+def platform_of(entry):
+    p = entry.get("platform") if isinstance(entry, dict) else None
+    if not isinstance(p, dict) or not p.get("os") or not p.get("architecture") or p.get("os") == "unknown":
+        return None
+    return f"{p['os']}/{p['architecture']}" + (f"/{p['variant']}" if p.get("variant") else "")
+
+
+def image_size(manifest):
+    """Config plus layers of one image manifest; None when it is not one."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("layers"), list):
+        return None
+    parts = [manifest.get("config") or {}] + manifest["layers"]
+    return sum(int(p.get("size") or 0) for p in parts if isinstance(p, dict))
+
+
+def describe(repo_dir, entry):
+    """(sizeBytes or None, platforms) of what an index.json entry names."""
+    path = blob_path(repo_dir, entry.get("digest"))
+    manifest = read_json(path) if path else None
+    if not isinstance(manifest, dict):
+        return None, []
+    if entry.get("mediaType") in INDEX_TYPES or isinstance(manifest.get("manifests"), list):
+        total, platforms = 0, []
+        for child in manifest.get("manifests") or []:
+            if not isinstance(child, dict):
+                continue
+            child_path = blob_path(repo_dir, child.get("digest"))
+            size = image_size(read_json(child_path)) if child_path else None
+            if size is None:
+                return None, platforms
+            total += size
+            platform = platform_of(child)
+            if platform and platform not in platforms:
+                platforms.append(platform)
+        return total, platforms
+    size = image_size(manifest)
+    config_path = blob_path(repo_dir, (manifest.get("config") or {}).get("digest"))
+    config = read_json(config_path) if config_path else None
+    platform = platform_of({"platform": config}) if isinstance(config, dict) else None
+    return size, [platform] if platform else []
+
+
+def pushed_at(repo_dir, digest):
+    path = blob_path(repo_dir, digest)
+    try:
+        at = os.stat(path).st_mtime if path else None
+    except OSError:
+        at = None
+    return at
+
+
+def iso(seconds):
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main():
+    try:
+        name = json.loads(sys.stdin.readline() or "{}").get("repository")
+    except (ValueError, AttributeError):
+        name = None
+    if not isinstance(name, str) or len(name) > 255 or not re.fullmatch(NAME_RE, name):
+        fail("repository: the name of a repository, like myapp or team/api")
+    conf = read_json(CONF)
+    try:
+        root = conf["storage"]["rootDirectory"]
+    except (KeyError, TypeError):
+        fail("the registry has no data directory yet")
+    repo_dir = os.path.join(root, name)
+    if not os.path.isfile(os.path.join(repo_dir, "oci-layout")):
+        fail(f"no repository {name}")
+    index = read_json(os.path.join(repo_dir, "index.json"))
+    manifests = index.get("manifests") if isinstance(index, dict) else None
+    tags = []
+    for entry in manifests or []:
+        tag = (entry.get("annotations") or {}).get(TAG) if isinstance(entry, dict) else None
+        if not isinstance(tag, str):
+            continue
+        at = pushed_at(repo_dir, entry.get("digest"))
+        tags.append((at or 0, tag, entry))
+    tags.sort(key=lambda t: (-t[0], t[1]))
+    out = {"repository": name, "tags": []}
+    if len(tags) > MAX_TAGS:
+        out["tagsTruncated"] = True
+    for at, tag, entry in tags[:MAX_TAGS]:
+        size, platforms = describe(repo_dir, entry)
+        row = {"name": tag, "digest": str(entry.get("digest") or "")}
+        if at:
+            row["pushedAt"] = iso(at)
+        if size is not None:
+            row["sizeBytes"] = size
+        if platforms:
+            row["platforms"] = platforms
+        out["tags"].append(row)
+    print(json.dumps(out))
+
+
+main()

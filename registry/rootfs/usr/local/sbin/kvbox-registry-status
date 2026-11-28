@@ -4,7 +4,7 @@
 #
 #   {"ready": true, "accepting": true, "version": "2.1.23", "user": "kvbox",
 #    "storage": {"usedBytes": 2254857, "totalBytes": 21474836480},
-#    "repositories": [{"name": "myapp", "tags": 3}, {"name": "team/api", "tags": 12}]}
+#    "repositories": [{"name": "myapp", "tags": 3, "pushedAt": "2026-11-28T09:14:03Z"}, {"name": "team/api", "tags": 12}]}
 #
 # ready         kvbox-registry-init has finished: the server has its password and its data directory
 # accepting     the server answers on its port (it asks for the login: 401 without one)
@@ -13,7 +13,10 @@
 # storage       the filesystem holding the images: the volume when REGISTRY_DATA is set
 # repositories  every repository with how many tags it has, by name; read from the data directory
 #               (each is an OCI image layout), so it needs no password. At most MAX_REPOSITORIES, and
-#               `repositoriesTruncated: true` when there are more.
+#               `repositoriesTruncated: true` when there are more. `pushedAt` is when its newest tagged
+#               image came into the registry (that manifest's file); absent for one with no tag.
+#               The tags themselves are kvbox-registry-tags' to list.
+import datetime
 import json
 import os
 import re
@@ -64,13 +67,30 @@ def storage(path):
     return {"usedBytes": (fs.f_blocks - fs.f_bfree) * fs.f_frsize, "totalBytes": fs.f_blocks * fs.f_frsize}
 
 
-def tags(repo_dir):
+def pushed(repo_dir, digest):
+    """When the manifest of that digest was written, in seconds; None when it cannot be told."""
+    algo, _, value = str(digest).partition(":")
+    if not re.fullmatch(r"[a-z0-9]+", algo) or not re.fullmatch(r"[a-f0-9]+", value):
+        return None
+    try:
+        return os.stat(os.path.join(repo_dir, "blobs", algo, value)).st_mtime
+    except OSError:
+        return None
+
+
+def described(name, repo_dir):
+    """A repository's row: how many tags, and when the newest of their images was pushed."""
     try:
         with open(os.path.join(repo_dir, "index.json"), encoding="utf-8") as f:
             manifests = json.load(f).get("manifests") or []
     except (OSError, ValueError, AttributeError):
-        return 0
-    return len({(m.get("annotations") or {}).get(TAG) for m in manifests if isinstance(m, dict)} - {None})
+        return {"name": name, "tags": 0}
+    tagged = [m for m in manifests if isinstance(m, dict) and (m.get("annotations") or {}).get(TAG) is not None]
+    row = {"name": name, "tags": len({m["annotations"][TAG] for m in tagged})}
+    times = [t for t in (pushed(repo_dir, m.get("digest")) for m in tagged) if t]
+    if times:
+        row["pushedAt"] = datetime.datetime.fromtimestamp(max(times), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return row
 
 
 def repositories(root):
@@ -83,7 +103,7 @@ def repositories(root):
             if len(found) >= MAX_REPOSITORIES:
                 truncated = True
                 break
-            found.append({"name": os.path.relpath(path, root), "tags": tags(path)})
+            found.append(described(os.path.relpath(path, root), path))
         else:
             dirs[:] = [d for d in dirs if not d.startswith((".", "_"))]
     return found, truncated
